@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J tts_synth
-#SBATCH -A YOUR_ACCOUNT
-#SBATCH -p YOUR_PARTITION
+#SBATCH -A mst115022
+#SBATCH -p 8gpus
 #SBATCH --array=0-46
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -14,13 +14,15 @@
 
 # ── USER CONFIGURATION ────────────────────────────────────────────────────────
 REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
-SIF=/home/jaylin0418/SpeechLab/env/cosyvoice2_v4.sif
-PYTHON=/opt/conda/envs/cosyvoice/bin/python
-BIND="--bind /home/jaylin0418:/home/jaylin0418 --bind /work/jaylin0418:/work/jaylin0418"
+# breezyvoice_py310 has torch+torchaudio+soundfile+librosa (runs IndexTTS-2 too)
+PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
 INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
-NANO4_DIR=/home/jaylin0418/SpeechLab/Nano4
-CV_DIR=/work/jaylin0418/common_voice_zh_TW
-DATA_TYPE=user_agent
+CV_POOL=/work/jaylin0418/common_voice_zh_TW/pool/cv_pool.json
+REF_AUDIO_DIR=/home/jaylin0418/SpeechLab/ref_audio/eleven_lab_emotion
+BREEZY_REPO=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice
+BREEZY_PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+BREEZY_MODEL=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
+DATA_TYPE=user_agent   # user_agent | user_agent_v2 | daily_conv | daily_conv_v2
 INPUT_BASE=$REPO/output/${DATA_TYPE}
 OUTPUT_BASE=$REPO/tts_output/${DATA_TYPE}
 # ─────────────────────────────────────────────────────────────────────────────
@@ -43,23 +45,24 @@ OUTPUT=$OUTPUT_BASE/${TOPIC}
 mkdir -p $REPO/logs $OUTPUT
 
 echo "=========================================="
-echo "Job: tts_synth  Topic: $TOPIC"
+echo "Job: tts_synth  Topic: $TOPIC  DataType: $DATA_TYPE"
 echo "Job ID: $SLURM_JOB_ID  Node: $SLURM_NODELIST"
 echo "Start: $(date)"
 echo "=========================================="
 
-singularity exec --nv $BIND $SIF bash -c "
-    export PYTHONNOUSERSITE=1
-    export PYTHONPATH=/opt/conda/envs/cosyvoice/lib/python3.10/site-packages:$NANO4_DIR:/work/jaylin0418/model_merging/pip_packages
-    $PYTHON $REPO/tts/tts_runner.py \
-        --input  $INPUT \
-        --output $OUTPUT \
-        --config $REPO/conf/base.yaml \
-        --indextts-dir  $INDEXTTS_DIR \
-        --nano4-dir     $NANO4_DIR \
-        --common-voice-dir $CV_DIR \
-        --ref-audio-dir $REPO/ref_audio \
-        --worker-id 0 --num-workers 1
-" 2>&1
+# IndexTTS-2 needs its own path; BreezyVoice paths added for subprocess env
+export PYTHONPATH=$INDEXTTS_DIR:$REPO:$PYTHONPATH
+
+$PYTHON $REPO/tts/tts_runner.py \
+    --input         "$INPUT" \
+    --output        "$OUTPUT" \
+    --config        $REPO/conf/base.yaml \
+    --indextts-dir  $INDEXTTS_DIR \
+    --cv-pool       $CV_POOL \
+    --ref-audio-dir $REF_AUDIO_DIR \
+    --breezy-repo   $BREEZY_REPO \
+    --breezy-python $BREEZY_PYTHON \
+    --breezy-model  $BREEZY_MODEL \
+    --worker-id 0 --num-workers 1
 
 echo "End: $(date)"

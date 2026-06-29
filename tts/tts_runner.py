@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Unified TTS runner for TASTE2-TW-QWEN2.5-Data pipeline.
+TTS runner for TASTE2-TW-QWEN2.5-Data pipeline.
 
-Reads JSONL dialogue files, synthesizes each turn, applies speed stretching,
-and writes per-dialogue WAV files + updated JSONL with audio metadata.
+Two backends (same as open_source/dialogue_v1/syn_ver2_breezy.py):
+  - indextts:   IndexTTS-2 loaded in-process
+                Speaker ref = Common Voice zh-TW (fixed per role per dialogue, seeded by ID)
+  - breezyvoice: BreezyVoice called via subprocess (batch_inference.py CSV pattern)
+                Speaker ref = Common Voice zh-TW (random per turn for maximum diversity)
 
-Backend selection:
-  - "indextts":   IndexTTS-2, one fixed speaker per role per dialogue
-  - "breezyvoice": BreezyVoice, random Common Voice zh-TW speaker per turn
+Both backends use cv_pool.json built by prepare_cv_pool.py.
+cv_pool.json format: [{wav: relative_path, sentence: text, ...}, ...]
 
 Usage:
     python tts/tts_runner.py \
@@ -15,20 +17,26 @@ Usage:
         --output tts_output/user_agent/藝術/ \
         --config conf/base.yaml \
         --indextts-dir /work/jaylin0418/cog-IndexTTS-2 \
-        --common-voice-dir /work/jaylin0418/common_voice_zh_TW \
+        --cv-pool      /work/jaylin0418/common_voice_zh_TW/pool/cv_pool.json \
+        --breezy-repo  /home/jaylin0418/SpeechLab/tts_model/BreezyVoice \
+        --breezy-python /home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python \
         --worker-id 0 --num-workers 1
 """
 import argparse
+import csv
 import json
 import logging
 import os
 import random
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+import torch
+import torchaudio
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -37,72 +45,203 @@ from tts.speed_stretch import stretch_wav
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-SILENCE_SEC = 0.25  # gap between turns
+SILENCE_SEC = 0.25
+SAMPLE_RATE = 24000
+
+# ── Common Voice pool ─────────────────────────────────────────────────────────
+
+def load_cv_pool(cv_pool_json: str) -> list[dict]:
+    """
+    Load cv_pool.json built by prepare_cv_pool.py.
+    Returns list of {wav: rel_path, sentence: text, wav_abs: abs_path, ...}
+    """
+    with open(cv_pool_json, encoding="utf-8") as f:
+        pool = json.load(f)
+    cv_dir = Path(cv_pool_json).parent
+    for entry in pool:
+        entry["wav_abs"] = str(cv_dir / entry["wav"])
+    return pool
 
 
-# ── Common Voice speaker pool ─────────────────────────────────────────────────
+def load_eleven_lab_neutral(ref_audio_dir: Path) -> list[dict]:
+    """
+    Load neutral (no-emotion-prefix) files from eleven_lab_emotion.
+    Returns list of {wav_abs, sentence}
+    """
+    _EMOTION_PREFIXES = {
+        "afraid","amusement","angry","anxiety","calm","compassion","contentment",
+        "cry","disappointment","disgusted","envy","excitement","frustration",
+        "gratitude","grief","guilt","happy","hope","hysteria","melancholic",
+        "pitch","pride","relief","sad","sarcastic","shame","surprised",
+        "volume","whisper",
+    }
+    trans_path = ref_audio_dir / "transcriptions.json"
+    if not trans_path.exists():
+        return []
+    with open(trans_path, encoding="utf-8") as f:
+        transcriptions = json.load(f)
+    pool = []
+    for rel_path, text in transcriptions.items():
+        prefix = Path(rel_path).stem.split("_")[0].lower()
+        if prefix not in _EMOTION_PREFIXES:
+            pool.append({
+                "wav_abs": str(ref_audio_dir / rel_path),
+                "sentence": text,
+            })
+    return pool
 
-def load_cv_speakers(cv_dir: str) -> list[str]:
-    """Return list of .wav paths from Common Voice clips/."""
-    clips_dir = Path(cv_dir) / "clips"
-    wavs = sorted(clips_dir.glob("*.wav"))
-    if not wavs:
-        # Also accept mp3; convert on the fly later
-        mp3s = sorted(clips_dir.glob("*.mp3"))
-        return [str(p) for p in mp3s]
-    return [str(p) for p in wavs]
 
-
-# ── IndexTTS-2 backend ────────────────────────────────────────────────────────
+# ── IndexTTS-2 ────────────────────────────────────────────────────────────────
 
 _indextts_model = None
 
-def load_indextts(model_dir: str, repo_dir: str):
+def load_indextts(indextts_dir: str) -> object:
     global _indextts_model
     if _indextts_model is not None:
         return _indextts_model
-    sys.path.insert(0, repo_dir)
+    sys.path.insert(0, indextts_dir)
+    from indextts import infer_v2
+
+    # Suppress noisy QwenEmotion errors (we don't use emotion)
+    original_qwen = getattr(infer_v2, "QwenEmotion", None)
+    if original_qwen and not getattr(original_qwen, "_patched", False):
+        class _SafeQwenEmotion:
+            _patched = True
+            def __init__(self, model_dir):
+                try:
+                    self._inner = original_qwen(model_dir)
+                except Exception:
+                    self._inner = None
+            def inference(self, text):
+                if self._inner is None:
+                    return {"calm": 1.0}
+                try:
+                    return self._inner.inference(text)
+                except Exception:
+                    return {"calm": 1.0}
+        infer_v2.QwenEmotion = _SafeQwenEmotion
+
     from indextts.infer_v2 import IndexTTS2
-    _indextts_model = IndexTTS2(model_dir=model_dir)
+    ckpt_dir = str(Path(indextts_dir) / "checkpoints")
+    _indextts_model = IndexTTS2(
+        cfg_path=str(Path(ckpt_dir) / "config.yaml"),
+        model_dir=ckpt_dir,
+        use_fp16=torch.cuda.is_available(),
+        device="cuda:0" if torch.cuda.is_available() else "cpu",
+        use_cuda_kernel=torch.cuda.is_available(),
+    )
     return _indextts_model
 
 
-def synth_indextts(model, text: str, ref_wav: str, out_path: str, sr: int = 24000):
-    model.infer(audio_prompt=ref_wav, text=text, output_path=out_path)
+def synth_indextts(tts, text: str, spk_ref: str, out_path: str) -> None:
+    tts.infer(
+        spk_audio_prompt=spk_ref,
+        text=text,
+        output_path=out_path,
+        emo_audio_prompt=None,
+        use_random=False,
+        verbose=False,
+    )
 
 
-# ── BreezyVoice backend ───────────────────────────────────────────────────────
+# ── BreezyVoice (subprocess) ──────────────────────────────────────────────────
 
-_breezy_model = None
-
-def load_breezyvoice(nano4_dir: str):
-    global _breezy_model
-    if _breezy_model is not None:
-        return _breezy_model
-    sys.path.insert(0, nano4_dir)
-    from cosyvoice.cli.cosyvoice import CosyVoice2
-    _breezy_model = CosyVoice2("pretrained_models/CosyVoice2-0.5B",
-                                load_jit=False, load_trt=False)
-    return _breezy_model
+BREEZY_MODEL_PATH = str(
+    Path("/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/"
+         "models--MediaTek-Research--BreezyVoice-300M/snapshots/"
+         "e33b502e0ac21c16b0ee0d00df66ac3fa737393d")
+)
 
 
-def synth_breezyvoice(model, text: str, ref_wav: str, out_path: str, sr: int = 24000):
-    import torchaudio
-    import torch
-    prompt_speech, prompt_sr = torchaudio.load(ref_wav)
-    if prompt_sr != 16000:
-        prompt_speech = torchaudio.functional.resample(prompt_speech, prompt_sr, 16000)
-    for chunk in model.inference_zero_shot(
-        text, "", prompt_speech_16k=prompt_speech[0], stream=False
-    ):
-        audio = chunk["tts_speech"].squeeze().numpy()
-        sf.write(out_path, audio, sr)
-        break
+def _ensure_wav_mono_16k(src: str, dst: str) -> None:
+    wav, sr = torchaudio.load(src)
+    if sr != 16000:
+        wav = torchaudio.functional.resample(wav, sr, 16000)
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+    torchaudio.save(dst, wav, 16000)
 
 
-# ── Mix turns into single dialogue WAV ───────────────────────────────────────
+def synth_breezyvoice_batch(
+    turns: list[dict],
+    turn_refs: list[dict],             # per-turn: {wav_abs, sentence}
+    out_dir: Path,
+    breezy_repo: str,
+    breezy_python: str,
+    breezy_model: str = BREEZY_MODEL_PATH,
+) -> list[Path | None]:
+    """
+    Synthesize all turns in one BreezyVoice batch_inference.py subprocess call.
+    Each turn gets its own speaker (turn_refs[i]).
+    Returns list of output wav paths (None if a turn failed).
+    """
+    import shutil
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        prompt_dir = tmp / "prompts"
+        raw_out_dir = tmp / "raw_out"
+        prompt_dir.mkdir()
+        raw_out_dir.mkdir()
 
-def concat_wavs(wav_paths: list[str], silence_sec: float, out_path: str, sr: int = 24000):
+        csv_path = tmp / "batch.csv"
+        row_stems: list[str] = []
+        csv_rows = []
+        for i, (turn, ref) in enumerate(zip(turns, turn_refs)):
+            out_stem = f"turn_{i:03d}"
+            spk_stem = f"spk_{i:03d}"
+            # Convert ref wav to 16kHz mono in prompt_dir
+            _ensure_wav_mono_16k(ref["wav_abs"], str(prompt_dir / f"{spk_stem}.wav"))
+            row_stems.append(out_stem)
+            csv_rows.append({
+                "speaker_prompt_audio_filename": spk_stem,
+                "speaker_prompt_text_transcription": ref.get("sentence", ""),
+                "content_to_synthesize": turn["text"],
+                "output_audio_filename": out_stem,
+            })
+
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                "speaker_prompt_audio_filename",
+                "speaker_prompt_text_transcription",
+                "content_to_synthesize",
+                "output_audio_filename",
+            ])
+            writer.writeheader()
+            writer.writerows(csv_rows)
+
+        cmd = [
+            breezy_python,
+            "batch_inference.py",
+            "--csv_file", str(csv_path),
+            "--speaker_prompt_audio_folder", str(prompt_dir),
+            "--output_audio_folder", str(raw_out_dir),
+            "--model_path", breezy_model,
+        ]
+        env = dict(os.environ)
+        env["PYTHONUTF8"] = "1"
+        try:
+            subprocess.run(cmd, cwd=breezy_repo, env=env, check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"BreezyVoice subprocess failed: {e.stderr.decode()[-500:]}")
+            return [None] * len(turns)
+
+        results = []
+        for stem in row_stems:
+            src = raw_out_dir / f"{stem}.wav"
+            if src.exists():
+                dst = out_dir / f"{stem}.wav"
+                shutil.copy2(str(src), str(dst))
+                results.append(dst)
+            else:
+                results.append(None)
+        return results
+
+
+# ── Audio concat ──────────────────────────────────────────────────────────────
+
+def concat_wavs(wav_paths: list[str], silence_sec: float, out_path: str,
+                sr: int = SAMPLE_RATE) -> float:
     silence = np.zeros(int(silence_sec * sr), dtype=np.float32)
     segments = []
     for p in wav_paths:
@@ -114,16 +253,31 @@ def concat_wavs(wav_paths: list[str], silence_sec: float, out_path: str, sr: int
             audio = audio.mean(axis=1)
         segments.append(audio)
         segments.append(silence)
-    full = np.concatenate(segments[:-1]) if segments else np.array([], dtype=np.float32)
+    if not segments:
+        return 0.0
+    full = np.concatenate(segments[:-1])
     sf.write(out_path, full, sr)
-    return len(full) / sr  # total duration in seconds
+    return len(full) / sr
 
 
-# ── Main synthesis loop ───────────────────────────────────────────────────────
+# ── Per-dialogue processing ───────────────────────────────────────────────────
 
-def process_dialogue(record: dict, out_dir: Path, cfg: dict,
-                     cv_speakers: list[str], indextts_model, breezy_model,
-                     ref_audio_dir: Path, sr: int = 24000) -> dict | None:
+INDEXTTS_CV_RATIO = 0.30   # 30% Common Voice, 70% eleven_lab for IndexTTS-2
+
+
+def process_dialogue(
+    record: dict,
+    out_dir: Path,
+    cfg: dict,
+    cv_pool: list[dict],              # Common Voice pool [{wav_abs, sentence, ...}]
+    eleven_lab_pool: list[dict],      # eleven_lab neutral pool [{wav_abs, sentence}]
+    tts_model,                         # IndexTTS2 object or None
+    breezy_repo: str,
+    breezy_python: str,
+    breezy_model: str,
+    fast_factor: float = 0.77,
+    slow_factor: float = 1.33,
+) -> dict | None:
     dlg_id = record["id"]
     backend = record.get("tts_backend", "indextts")
     turns = record.get("turns", [])
@@ -134,87 +288,114 @@ def process_dialogue(record: dict, out_dir: Path, cfg: dict,
     dlg_out_dir.mkdir(parents=True, exist_ok=True)
     done_flag = dlg_out_dir / "done.flag"
     if done_flag.exists():
-        # Load existing metadata
         meta_path = dlg_out_dir / "meta.json"
         if meta_path.exists():
             return json.loads(meta_path.read_text())
         return None
 
-    # Assign fixed speakers per role for IndexTTS-2
-    roles = list({t["role"] for t in turns})
-    ref_wavs = {}
-    if backend == "indextts":
-        ref_dir = ref_audio_dir / "indextts"
-        ref_dir.mkdir(parents=True, exist_ok=True)
-        for role in roles:
-            role_refs = sorted(ref_dir.glob(f"{role}_*.wav"))
-            if not role_refs:
-                logger.warning(f"No ref audio for role={role} in {ref_dir}")
-                return None
-            ref_wavs[role] = str(random.choice(role_refs))
+    rng = random.Random(dlg_id)
+    roles = sorted({t["role"] for t in turns})
 
-    turn_wavs = []
+    # Synthesize
+    turn_wav_paths: list[Path | None] = []
+
+    if backend == "indextts":
+        if tts_model is None:
+            logger.error("IndexTTS-2 model not loaded")
+            return None
+        # IndexTTS-2: fixed speaker per role, 70% eleven_lab / 30% Common Voice
+        role_refs: dict[str, dict] = {}
+        for role in roles:
+            if rng.random() < INDEXTTS_CV_RATIO and cv_pool:
+                role_refs[role] = rng.choice(cv_pool)
+            else:
+                role_refs[role] = rng.choice(eleven_lab_pool) if eleven_lab_pool else rng.choice(cv_pool)
+
+        for i, turn in enumerate(turns):
+            role = turn["role"]
+            raw_wav = dlg_out_dir / f"turn_{i:03d}_raw.wav"
+            if not raw_wav.exists():
+                try:
+                    synth_indextts(tts_model, turn["text"],
+                                   role_refs[role]["wav_abs"], str(raw_wav))
+                except Exception as e:
+                    logger.error(f"{dlg_id} turn {i}: {e}")
+                    return None
+            turn_wav_paths.append(raw_wav)
+
+    else:  # breezyvoice — 100% Common Voice, random per turn
+        turn_refs = [rng.choice(cv_pool) for _ in turns]
+        raw_paths = synth_breezyvoice_batch(
+            turns, turn_refs,
+            dlg_out_dir, breezy_repo, breezy_python, breezy_model,
+        )
+        if any(p is None for p in raw_paths):
+            logger.warning(f"{dlg_id}: some BreezyVoice turns failed")
+        turn_wav_paths = raw_paths
+
+    # Apply speed stretch and compute timestamps
     turn_meta = []
+    stretched_wavs = []
     timestamp = 0.0
 
-    for i, turn in enumerate(turns):
-        role = turn["role"]
-        text = turn["text"]
+    for i, (turn, raw_wav) in enumerate(zip(turns, turn_wav_paths)):
+        if raw_wav is None or not raw_wav.exists():
+            logger.warning(f"{dlg_id} turn {i}: missing wav, skipping")
+            continue
+
         speed = turn.get("speed", "normal")
-        turn_wav = dlg_out_dir / f"turn_{i:03d}_{role}.wav"
-        stretched_wav = dlg_out_dir / f"turn_{i:03d}_{role}_stretched.wav"
+        stretched = dlg_out_dir / f"turn_{i:03d}_stretched.wav"
+        if not stretched.exists():
+            stretch_wav(str(raw_wav), str(stretched), speed, fast_factor, slow_factor)
 
-        # Synthesize
-        if not turn_wav.exists():
-            try:
-                if backend == "indextts":
-                    synth_indextts(indextts_model, text, ref_wavs[role], str(turn_wav), sr)
-                else:
-                    ref = random.choice(cv_speakers)
-                    synth_breezyvoice(breezy_model, text, ref, str(turn_wav), sr)
-            except Exception as e:
-                logger.error(f"TTS failed for {dlg_id} turn {i}: {e}")
-                return None
-
-        # Apply speed stretch
-        if not stretched_wav.exists():
-            stretch_wav(str(turn_wav), str(stretched_wav), speed,
-                        fast_factor=cfg.get("speed", {}).get("fast_factor", 0.77),
-                        slow_factor=cfg.get("speed", {}).get("slow_factor", 1.33))
-
-        audio, audio_sr = sf.read(str(stretched_wav), dtype="float32")
+        audio, audio_sr = sf.read(str(stretched), dtype="float32")
         duration = len(audio) / audio_sr
         turn_meta.append({
             **turn,
-            "wav": str(stretched_wav.relative_to(out_dir.parent)),
+            "wav": str(stretched.relative_to(out_dir.parent)),
             "timestamp_start": round(timestamp, 3),
             "timestamp_end": round(timestamp + duration, 3),
         })
+        stretched_wavs.append(str(stretched))
         timestamp += duration + SILENCE_SEC
-        turn_wavs.append(str(stretched_wav))
 
-    # Concat full dialogue WAV
+    if not stretched_wavs:
+        return None
+
     full_wav = dlg_out_dir / "full.wav"
-    total_dur = concat_wavs(turn_wavs, SILENCE_SEC, str(full_wav), sr)
+    total_dur = concat_wavs(stretched_wavs, SILENCE_SEC, str(full_wav), SAMPLE_RATE)
 
-    result = {**record, "turns": turn_meta,
-              "full_wav": str(full_wav.relative_to(out_dir.parent)),
-              "total_duration_sec": round(total_dur, 2)}
+    result = {
+        **record,
+        "turns": turn_meta,
+        "full_wav": str(full_wav.relative_to(out_dir.parent)),
+        "total_duration_sec": round(total_dur, 2),
+    }
     (dlg_out_dir / "meta.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2))
     done_flag.touch()
     return result
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Input JSONL file")
-    parser.add_argument("--output", required=True, help="Output directory")
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
     parser.add_argument("--config", default="conf/base.yaml")
-    parser.add_argument("--indextts-dir", default=None)
-    parser.add_argument("--nano4-dir", default=None, help="BreezyVoice Nano4 dir")
-    parser.add_argument("--common-voice-dir", default=None)
-    parser.add_argument("--ref-audio-dir", default=None)
+    parser.add_argument("--indextts-dir",
+                        default="/work/jaylin0418/cog-IndexTTS-2")
+    parser.add_argument("--cv-pool",
+                        default="/work/jaylin0418/common_voice_zh_TW/pool/cv_pool.json")
+    parser.add_argument("--ref-audio-dir",
+                        default="/home/jaylin0418/SpeechLab/ref_audio/eleven_lab_emotion",
+                        help="eleven_lab_emotion dir for IndexTTS-2 neutral ref (70%)")
+    parser.add_argument("--breezy-repo",
+                        default="/home/jaylin0418/SpeechLab/tts_model/BreezyVoice")
+    parser.add_argument("--breezy-python",
+                        default="/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python")
+    parser.add_argument("--breezy-model", default=BREEZY_MODEL_PATH)
     parser.add_argument("--worker-id", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=1)
     args = parser.parse_args()
@@ -222,20 +403,18 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    tts_cfg = cfg.get("tts", {})
-    indextts_dir = args.indextts_dir or tts_cfg.get("indextts_repo_dir")
-    indextts_model_dir = tts_cfg.get("indextts_model_dir")
-    nano4_dir = args.nano4_dir
-    cv_dir = args.common_voice_dir or tts_cfg.get("breezyvoice_common_voice_dir")
-    ref_audio_dir = Path(args.ref_audio_dir or tts_cfg.get("ref_audio_dir", "ref_audio"))
+    speed_cfg = cfg.get("speed", {})
+    fast_factor = speed_cfg.get("fast_factor", 0.77)
+    slow_factor = speed_cfg.get("slow_factor", 1.33)
+
+    cv_pool = load_cv_pool(args.cv_pool)
+    logger.info(f"Common Voice pool: {len(cv_pool)} speakers")
+    eleven_lab_pool = load_eleven_lab_neutral(Path(args.ref_audio_dir))
+    logger.info(f"eleven_lab neutral pool: {len(eleven_lab_pool)} files")
+
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
-    sr = tts_cfg.get("sample_rate", 24000)
 
-    # Load speaker pool
-    cv_speakers = load_cv_speakers(cv_dir) if cv_dir else []
-
-    # Read all records from JSONL
     records = []
     with open(args.input) as f:
         for line in f:
@@ -243,32 +422,28 @@ def main():
             if line:
                 records.append(json.loads(line))
 
-    # Worker slice
     per_worker = len(records) // args.num_workers
     start = args.worker_id * per_worker
     end = start + per_worker if args.worker_id < args.num_workers - 1 else len(records)
     my_records = records[start:end]
-    logger.info(f"Worker {args.worker_id}: processing {len(my_records)} dialogues")
+    logger.info(f"Worker {args.worker_id}: {len(my_records)} dialogues")
 
-    # Determine which backends are needed
     needs_indextts = any(r.get("tts_backend") == "indextts" for r in my_records)
-    needs_breezy = any(r.get("tts_backend") == "breezyvoice" for r in my_records)
-
-    indextts_model = None
-    if needs_indextts and indextts_dir and indextts_model_dir:
+    tts_model = None
+    if needs_indextts:
         logger.info("Loading IndexTTS-2...")
-        indextts_model = load_indextts(indextts_model_dir, indextts_dir)
-
-    breezy_model = None
-    if needs_breezy and nano4_dir:
-        logger.info("Loading BreezyVoice...")
-        breezy_model = load_breezyvoice(nano4_dir)
+        tts_model = load_indextts(args.indextts_dir)
+        logger.info("IndexTTS-2 ready.")
 
     out_jsonl = out_dir / f"tts_output_w{args.worker_id:02d}.jsonl"
     with open(out_jsonl, "a", encoding="utf-8") as fout:
         for i, record in enumerate(my_records):
-            result = process_dialogue(record, out_dir, cfg, cv_speakers,
-                                      indextts_model, breezy_model, ref_audio_dir, sr)
+            result = process_dialogue(
+                record, out_dir, cfg,
+                cv_pool, eleven_lab_pool, tts_model,
+                args.breezy_repo, args.breezy_python, args.breezy_model,
+                fast_factor, slow_factor,
+            )
             if result:
                 fout.write(json.dumps(result, ensure_ascii=False) + "\n")
                 fout.flush()

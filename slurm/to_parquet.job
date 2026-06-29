@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J to_parquet_v5
-#SBATCH -A YOUR_ACCOUNT
-#SBATCH -p YOUR_PARTITION
+#SBATCH -A mst115022
+#SBATCH -p ngs125g
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
@@ -12,8 +12,8 @@
 
 # ── USER CONFIGURATION ────────────────────────────────────────────────────────
 REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
-PYTHON=/path/to/python
-DATA_TYPE=user_agent    # 每次改這個
+PYTHON=/home/jaylin0418/miniconda3/bin/python3
+DATA_TYPE=user_agent   # 每次改這個
 INPUT=$REPO/tts_output/${DATA_TYPE}
 OUTPUT=$REPO/parquet/${DATA_TYPE}
 PREFIX=${DATA_TYPE}
