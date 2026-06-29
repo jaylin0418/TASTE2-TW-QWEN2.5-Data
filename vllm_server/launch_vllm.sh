@@ -1,6 +1,6 @@
 #!/bin/bash
 # ── USER CONFIGURATION ────────────────────────────────────────────────────────
-MODEL_PATH=/work/jaylin0418/home_models/Qwen2.5-7B-Instruct
+MODEL_PATH=/work/jaylin0418/model_merging/models/Qwen2.5-7B-Instruct
 PORT=8000
 TENSOR_PARALLEL=1   # 調整為可用 GPU 數
 MAX_MODEL_LEN=8192
