@@ -10,7 +10,7 @@ Usage:
     python tts/prepare_cv_pool.py \
         --cv-dir /work/jaylin0418/common_voice_zh_TW \
         --out-dir /work/jaylin0418/common_voice_zh_TW/pool \
-        --min-sec 1.5 --max-sec 10.0
+        --min-sec 3.5 --max-sec 10.0
 """
 import argparse
 import glob
@@ -51,7 +51,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cv-dir", default="/work/jaylin0418/common_voice_zh_TW")
     parser.add_argument("--out-dir", default="/work/jaylin0418/common_voice_zh_TW/pool")
-    parser.add_argument("--min-sec", type=float, default=1.5,
+    parser.add_argument("--min-sec", type=float, default=3.5,
                         help="Minimum audio duration to accept")
     parser.add_argument("--max-sec", type=float, default=10.0,
                         help="Maximum audio duration to accept")
