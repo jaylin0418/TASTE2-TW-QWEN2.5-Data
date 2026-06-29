@@ -1,0 +1,65 @@
+#!/bin/bash
+#SBATCH -J tts_synth
+#SBATCH -A YOUR_ACCOUNT
+#SBATCH -p YOUR_PARTITION
+#SBATCH --array=0-46
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/tts_%A_%a.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/tts_%A_%a.err
+
+# ── USER CONFIGURATION ────────────────────────────────────────────────────────
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+SIF=/home/jaylin0418/SpeechLab/env/cosyvoice2_v4.sif
+PYTHON=/opt/conda/envs/cosyvoice/bin/python
+BIND="--bind /home/jaylin0418:/home/jaylin0418 --bind /work/jaylin0418:/work/jaylin0418"
+INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
+NANO4_DIR=/home/jaylin0418/SpeechLab/Nano4
+CV_DIR=/work/jaylin0418/common_voice_zh_TW
+DATA_TYPE=user_agent
+INPUT_BASE=$REPO/output/${DATA_TYPE}
+OUTPUT_BASE=$REPO/tts_output/${DATA_TYPE}
+# ─────────────────────────────────────────────────────────────────────────────
+
+TOPICS=(
+    "藝術" "書籍" "汽車" "名人" "程式設計" "烹飪" "教育" "活動與展覽"
+    "時尚" "健身" "財經" "美食" "電玩遊戲" "園藝" "健康" "歷史"
+    "嗜好" "假期旅遊" "居家生活" "語言學習" "彩妝" "電影" "音樂"
+    "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
+    "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
+    "傳統文化" "旅遊" "天氣" "工作職場"
+    "台灣夜市文化" "廟宇與民俗信仰" "台灣選舉與公民社會"
+    "台灣景點旅遊" "台灣美食文化" "台灣交通日常"
+)
+
+TOPIC="${TOPICS[$SLURM_ARRAY_TASK_ID]}"
+INPUT=$INPUT_BASE/${TOPIC}/dialogues.jsonl
+OUTPUT=$OUTPUT_BASE/${TOPIC}
+
+mkdir -p $REPO/logs $OUTPUT
+
+echo "=========================================="
+echo "Job: tts_synth  Topic: $TOPIC"
+echo "Job ID: $SLURM_JOB_ID  Node: $SLURM_NODELIST"
+echo "Start: $(date)"
+echo "=========================================="
+
+singularity exec --nv $BIND $SIF bash -c "
+    export PYTHONNOUSERSITE=1
+    export PYTHONPATH=/opt/conda/envs/cosyvoice/lib/python3.10/site-packages:$NANO4_DIR:/work/jaylin0418/model_merging/pip_packages
+    $PYTHON $REPO/tts/tts_runner.py \
+        --input  $INPUT \
+        --output $OUTPUT \
+        --config $REPO/conf/base.yaml \
+        --indextts-dir  $INDEXTTS_DIR \
+        --nano4-dir     $NANO4_DIR \
+        --common-voice-dir $CV_DIR \
+        --ref-audio-dir $REPO/ref_audio \
+        --worker-id 0 --num-workers 1
+" 2>&1
+
+echo "End: $(date)"

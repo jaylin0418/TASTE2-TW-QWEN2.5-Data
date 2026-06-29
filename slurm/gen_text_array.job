@@ -1,0 +1,53 @@
+#!/bin/bash
+#SBATCH -J gen_text
+#SBATCH -A YOUR_ACCOUNT
+#SBATCH -p YOUR_PARTITION
+#SBATCH --array=0-46        # 0-46 = 47 topics (41 原有 + 6 台灣在地)
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --time=12:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_text_%A_%a.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_text_%A_%a.err
+
+# ── USER CONFIGURATION ────────────────────────────────────────────────────────
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/path/to/python           # Python with openai, pyyaml installed
+VLLM_HOST=localhost              # host where vLLM is running
+VLLM_PORT=8000
+DATA_TYPE=user_agent             # user_agent | daily_conv | user_agent_v2 | daily_conv_v2
+CONFIG=$REPO/conf/${DATA_TYPE}.yaml
+OUTPUT=$REPO/output/${DATA_TYPE}
+NUM_SCENARIOS=200
+# ─────────────────────────────────────────────────────────────────────────────
+
+mkdir -p $REPO/logs $OUTPUT
+
+# Map array task ID → topic
+TOPICS=(
+    "藝術" "書籍" "汽車" "名人" "程式設計" "烹飪" "教育" "活動與展覽"
+    "時尚" "健身" "財經" "美食" "電玩遊戲" "園藝" "健康" "歷史"
+    "嗜好" "假期旅遊" "居家生活" "語言學習" "彩妝" "電影" "音樂"
+    "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
+    "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
+    "傳統文化" "旅遊" "天氣" "工作職場"
+    "台灣夜市文化" "廟宇與民俗信仰" "台灣選舉與公民社會"
+    "台灣景點旅遊" "台灣美食文化" "台灣交通日常"
+)
+
+TOPIC="${TOPICS[$SLURM_ARRAY_TASK_ID]}"
+echo "=========================================="
+echo "Job: gen_text  Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID"
+echo "Topic: $TOPIC  DataType: $DATA_TYPE"
+echo "Start: $(date)"
+echo "=========================================="
+
+$PYTHON $REPO/generate/gen_user_agent.py \
+    --config "$CONFIG" \
+    --topic "$TOPIC" \
+    --num-scenarios "$NUM_SCENARIOS" \
+    --output "$OUTPUT" \
+    --vllm-url "http://${VLLM_HOST}:${VLLM_PORT}/v1"
+
+echo "End: $(date)"

@@ -1,0 +1,98 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# BASE CONFIG — shared across all data types
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── vLLM ────────────────────────────────────────────────────────────────────
+vllm:
+  base_url: "http://localhost:8000/v1"
+  api_key: "token"
+  model: "Qwen/Qwen2.5-7B-Instruct"
+  timeout: 120
+  max_retries: 5
+  retry_delay: 2.0
+
+# ── Generation params ────────────────────────────────────────────────────────
+gen:
+  temperature: 0.85
+  top_p: 0.9
+  max_tokens: 2048
+
+# ── Dialogue structure ───────────────────────────────────────────────────────
+dialogue:
+  min_turns: 8
+  max_turns: 16          # 每次 random 取 8~16 的偶數
+  max_chars_per_turn: 60 # 每輪最多 60 字
+  max_tts_sec: 30        # 每輪 TTS 不超過 30 秒
+
+# ── TTS ─────────────────────────────────────────────────────────────────────
+tts:
+  sample_rate: 24000
+  indextts_model_dir: /work/jaylin0418/cog-IndexTTS-2/checkpoints
+  indextts_repo_dir: /work/jaylin0418/cog-IndexTTS-2
+  breezyvoice_common_voice_dir: /work/jaylin0418/common_voice_zh_TW  # clips/ + validated.tsv
+  ref_audio_dir: /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/ref_audio
+
+# ── Output ───────────────────────────────────────────────────────────────────
+output:
+  base_dir: /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/output
+
+# ── Topics ───────────────────────────────────────────────────────────────────
+topics:
+  # 原有 41 個主題（台灣化）
+  - 藝術
+  - 書籍
+  - 汽車
+  - 名人
+  - 程式設計
+  - 烹飪
+  - 教育
+  - 活動與展覽
+  - 時尚
+  - 健身
+  - 財經
+  - 美食
+  - 電玩遊戲
+  - 園藝
+  - 健康
+  - 歷史
+  - 嗜好
+  - 假期旅遊
+  - 居家生活
+  - 語言學習
+  - 彩妝
+  - 電影
+  - 音樂
+  - 大自然
+  - 新聞時事
+  - 寵物
+  - 哲學
+  - 攝影
+  - 播客節目
+  - 政治
+  - 人際關係
+  - 科學
+  - 購物
+  - 社群媒體
+  - 心靈成長
+  - 運動
+  - 科技
+  - 傳統文化
+  - 旅遊
+  - 天氣
+  - 工作職場
+  # 台灣在地新主題
+  - 台灣夜市文化
+  - 廟宇與民俗信仰
+  - 台灣選舉與公民社會
+  - 台灣景點旅遊
+  - 台灣美食文化
+  - 台灣交通日常
+
+# ── Taiwan context hints (injected into prompts) ─────────────────────────────
+taiwan_hints: |
+  對話必須融入台灣在地脈絡。可自然提及：
+  - 地標：台北一〇一、九份、阿里山、日月潭、墾丁、太魯閣、西門町、大稻埕
+  - 交通：捷運、台鐵、高鐵、公車、計程車、YouBike
+  - 飲食：珍珠奶茶、鹹酥雞、蚵仔煎、滷肉飯、雞排、夜市小吃
+  - 習俗：媽祖遶境、元宵燈會、中秋烤肉、尾牙、廟會
+  - 品牌與日常：誠品書店、全聯、統一超商、夜市、廟口

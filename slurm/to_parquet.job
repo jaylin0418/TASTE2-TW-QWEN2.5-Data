@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH -J to_parquet_v5
+#SBATCH -A YOUR_ACCOUNT
+#SBATCH -p YOUR_PARTITION
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
+#SBATCH --time=04:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/parquet_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/parquet_%j.err
+
+# ── USER CONFIGURATION ────────────────────────────────────────────────────────
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/path/to/python
+DATA_TYPE=user_agent    # 每次改這個
+INPUT=$REPO/tts_output/${DATA_TYPE}
+OUTPUT=$REPO/parquet/${DATA_TYPE}
+PREFIX=${DATA_TYPE}
+# ─────────────────────────────────────────────────────────────────────────────
+
+mkdir -p $REPO/logs $OUTPUT
+
+echo "=========================================="
+echo "Job: to_parquet_v5  DataType: $DATA_TYPE"
+echo "Start: $(date)"
+echo "=========================================="
+
+$PYTHON $REPO/to_parquet/to_parquet_v5.py \
+    --input  "$INPUT" \
+    --output "$OUTPUT" \
+    --prefix "$PREFIX" \
+    --chunk-gb 1.0
+
+echo "End: $(date)"

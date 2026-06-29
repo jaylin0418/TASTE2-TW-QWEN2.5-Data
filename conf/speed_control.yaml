@@ -1,0 +1,24 @@
+defaults:
+  - base
+
+# speed_control 分兩種 type：speed_ua / speed_daily
+# 用 --type 參數在 gen_speed_control.py 切換
+type: speed_ua   # or speed_daily
+scenarios_per_topic: 40
+dialogues_per_scenario: 1
+
+# FSM 機率參數
+fsm:
+  p_leave_first: 0.75    # 從未切換過時，Normal → Fast/Slow 的機率
+  p_leave_again: 0.40    # 回到 Normal 後，再次離開的機率
+  p_return: 0.40         # Fast/Slow → Normal 的機率
+  # Fast 和 Slow 各佔 50%（平均分配）
+
+# Speed stretch factors
+speed:
+  fast_factor: 0.77   # audiostretchy：< 1 = 加速
+  slow_factor: 1.33   # audiostretchy：> 1 = 減速
+
+# 套用既有 user_agent 或 daily_conv 的 prompt（由 gen_speed_control.py 讀取）
+base_config_ua: conf/user_agent.yaml
+base_config_daily: conf/daily_conv.yaml
