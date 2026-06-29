@@ -2,7 +2,7 @@
 #SBATCH -J gen_text
 #SBATCH -A mst115022
 #SBATCH -p ngs62g
-#SBATCH --array=0-46        # 0-46 = 47 topics
+#SBATCH --array=0-44        # 0-46 = 47 topics
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
@@ -32,8 +32,7 @@ TOPICS=(
     "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
     "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
     "傳統文化" "旅遊" "天氣" "工作職場"
-    "台灣夜市文化" "廟宇與民俗信仰" "台灣選舉與公民社會"
-    "台灣景點旅遊" "台灣美食文化" "台灣交通日常"
+    "台灣文化" "台灣旅遊" "台灣社會" "民俗信仰"
 )
 
 TOPIC="${TOPICS[$SLURM_ARRAY_TASK_ID]}"
