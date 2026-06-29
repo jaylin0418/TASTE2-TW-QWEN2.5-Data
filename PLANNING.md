@@ -176,8 +176,8 @@ Speed control：在 TTS 後用 `audiostretchy` 做 time-stretching，**不加 em
   │ Fast / Slow → Normal：P_return = 0.40                   │
   │ Fast / Slow → 維持：1 - P_return = 0.60                 │
   ├──────────────────────────────────────────────────────────┤
-  │ 回到 Normal 後再次切換：P_leave_again = 0.25            │
-  │（比第一次低，確保不會一直跳）                            │
+  │ 回到 Normal 後再次切換：P_leave_again = 0.40            │
+  │（比第一次低，但仍有相當機率繼續切換）                    │
   └──────────────────────────────────────────────────────────┘
 
 每輪對話結束後執行一次 FSM 轉移。
