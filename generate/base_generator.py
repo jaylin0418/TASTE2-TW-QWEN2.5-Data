@@ -122,24 +122,27 @@ def parse_dialogue(text: str) -> list[dict]:
     Parse dialogue text into list of turns.
     Expected format per line: 「甲：...」 or 「乙：...」
     Returns: [{"role": "甲"/"乙", "text": "..."}]
+    Enforces strict alternation: drops consecutive turns from the same role.
     """
     turns = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
+        parsed = None
         for role in ("甲", "乙"):
-            prefix = f"{role}："
-            if line.startswith(prefix):
-                turns.append({"role": role, "text": line[len(prefix):].strip()})
-                break
-        else:
-            # Try with ASCII colon
-            for role in ("甲", "乙"):
-                prefix = f"{role}:"
+            for sep in ("：", ":"):
+                prefix = f"{role}{sep}"
                 if line.startswith(prefix):
-                    turns.append({"role": role, "text": line[len(prefix):].strip()})
+                    parsed = {"role": role, "text": line[len(prefix):].strip()}
                     break
+            if parsed:
+                break
+        if parsed:
+            # Enforce strict alternation: skip if same role as previous turn
+            if turns and turns[-1]["role"] == parsed["role"]:
+                continue
+            turns.append(parsed)
     return turns
 
 
