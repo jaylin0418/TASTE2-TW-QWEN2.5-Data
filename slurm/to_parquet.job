@@ -12,7 +12,7 @@
 
 # ── USER CONFIGURATION ────────────────────────────────────────────────────────
 REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
-PYTHON=/home/jaylin0418/miniconda3/bin/python3
+PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python3
 DATA_TYPE=user_agent   # 每次改這個
 INPUT=$REPO/tts_output/${DATA_TYPE}
 OUTPUT=$REPO/parquet/${DATA_TYPE}

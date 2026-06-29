@@ -1,29 +1,27 @@
 #!/bin/bash
-#SBATCH -J gen_text
+#SBATCH -J gen_speed
 #SBATCH -A mst115022
 #SBATCH -p ngs62g
-#SBATCH --array=0-46        # 0-46 = 47 topics
+#SBATCH --array=0-46
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=12:00:00
-#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_text_%A_%a.out
-#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_text_%A_%a.err
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_speed_%A_%a.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_speed_%A_%a.err
 
 # ── USER CONFIGURATION ────────────────────────────────────────────────────────
 REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
 PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
 VLLM_PORT=8000
-# Read vLLM server hostname written by launch_vllm.job
 VLLM_HOST=$(cat $REPO/logs/vllm_host.txt 2>/dev/null || echo "localhost")
-DATA_TYPE=user_agent   # user_agent | user_agent_v2 | daily_conv | daily_conv_v2
-CONFIG=$REPO/conf/${DATA_TYPE}.yaml
-OUTPUT=$REPO/output/${DATA_TYPE}
+# speed_ua (基於 user_agent prompt) 或 speed_daily (基於 daily_conv prompt)
+SPEED_TYPE=speed_ua
+CONFIG=$REPO/conf/speed_control.yaml
+OUTPUT=$REPO/output/${SPEED_TYPE}
 NUM_SCENARIOS=200
 # ─────────────────────────────────────────────────────────────────────────────
-
-mkdir -p $REPO/logs $OUTPUT
 
 TOPICS=(
     "藝術" "書籍" "汽車" "名人" "程式設計" "烹飪" "教育" "活動與展覽"
@@ -37,14 +35,17 @@ TOPICS=(
 )
 
 TOPIC="${TOPICS[$SLURM_ARRAY_TASK_ID]}"
+mkdir -p $REPO/logs $OUTPUT
+
 echo "=========================================="
-echo "Job: gen_text  Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID"
-echo "Topic: $TOPIC  DataType: $DATA_TYPE  vLLM: $VLLM_HOST:$VLLM_PORT"
+echo "Job: gen_speed  Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID"
+echo "Topic: $TOPIC  Type: $SPEED_TYPE  vLLM: $VLLM_HOST:$VLLM_PORT"
 echo "Start: $(date)"
 echo "=========================================="
 
-$PYTHON $REPO/generate/gen_user_agent.py \
+$PYTHON $REPO/generate/gen_speed_control.py \
     --config "$CONFIG" \
+    --type "$SPEED_TYPE" \
     --topic "$TOPIC" \
     --num-scenarios "$NUM_SCENARIOS" \
     --output "$OUTPUT" \

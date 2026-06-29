@@ -27,10 +27,18 @@ dialogue:
 # ── TTS ─────────────────────────────────────────────────────────────────────
 tts:
   sample_rate: 24000
-  indextts_model_dir: /work/jaylin0418/cog-IndexTTS-2/checkpoints
   indextts_repo_dir: /work/jaylin0418/cog-IndexTTS-2
-  breezyvoice_common_voice_dir: /work/jaylin0418/common_voice_zh_TW  # clips/ + validated.tsv
-  ref_audio_dir: /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/ref_audio
+  indextts_model_dir: /work/jaylin0418/cog-IndexTTS-2/checkpoints
+  cv_pool: /work/jaylin0418/common_voice_zh_TW/pool/cv_pool.json
+  ref_audio_dir: /home/jaylin0418/SpeechLab/ref_audio/eleven_lab_emotion
+  breezy_repo: /home/jaylin0418/SpeechLab/tts_model/BreezyVoice
+  breezy_python: /home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+  breezy_model: /home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
+
+# ── Speed stretch ─────────────────────────────────────────────────────────────
+speed:
+  fast_factor: 0.77
+  slow_factor: 1.33
 
 # ── Output ───────────────────────────────────────────────────────────────────
 output:
