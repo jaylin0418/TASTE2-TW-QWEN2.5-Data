@@ -24,13 +24,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 SPEED_LABELS = ["fast", "slow", "normal"]
-SPEED_WEIGHTS = [0.35, 0.35, 0.30]  # slight bias toward fast/slow
+SPEED_WEIGHTS = [1, 1, 1]  # equal probability
 
-# Chinese descriptions passed to the prompt
+# Chinese descriptions passed to the LLM prompt
 SPEED_CN = {
-    "fast": "快速",
-    "slow": "慢速",
-    "normal": "正常",
+    "fast":           "快速",
+    "slow":           "慢速",
+    "normal":         "正常（需在指令中說出速度要求，例如：照正常速度、普通速度）",
+    "normal_silent":  "（不提速度，甲直接給任務指令，不說任何速度要求）",
 }
 
 
@@ -73,13 +74,20 @@ def gen_if_control_dialogue(client: VLLMClient, cfg: dict,
 def assign_speeds_to_turns(turns: list[dict], speed_list: list[str]) -> list[dict]:
     """
     Assign speed labels to turns.
-    甲's turn (even index 0,2,4,...) → the speed 甲 is requesting for this task
-    乙's turn (odd index 1,3,5,...) → same speed (乙 executes at that speed)
+    User turn (even index 0,2,4,...): speed is embedded in text, no metadata tag → speed=""
+    Agent turn (odd index 1,3,5,...): executes at that speed → speed=fast/slow/""
+    Also rename roles: 甲→User, 乙→Agent.
     """
+    role_map = {"甲": "User", "乙": "Agent"}
     for i, turn in enumerate(turns):
+        turn["role"] = role_map.get(turn["role"], turn["role"])
         task_idx = i // 2
         speed = speed_list[task_idx] if task_idx < len(speed_list) else "normal"
-        turn["speed"] = speed
+        if i % 2 == 0:
+            turn["speed"] = ""  # User: speed embedded in text
+        else:
+            # normal and normal_silent both → no speed tag for Agent
+            turn["speed"] = speed if speed in ("fast", "slow") else ""
     return turns
 
 
@@ -101,7 +109,15 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_jsonl = out_dir / f"dialogues_w{args.worker_id:02d}.jsonl"
 
-    categories = cfg["if_categories"]
+    # if_categories can be a list (uniform) or dict {name: weight}
+    raw_cats = cfg["if_categories"]
+    if isinstance(raw_cats, dict):
+        categories = list(raw_cats.keys())
+        cat_weights = list(raw_cats.values())
+    else:
+        categories = list(raw_cats)
+        cat_weights = None  # uniform
+
     min_tasks = cfg.get("min_tasks", 3)
     max_tasks = cfg.get("max_tasks", 6)
     total = args.num_dialogues
@@ -134,8 +150,14 @@ def main():
                 continue
 
             num_tasks = random.randint(min_tasks, max_tasks)
-            task_list = random.sample(categories, min(num_tasks, len(categories)))
-            speed_list = random.choices(SPEED_LABELS, weights=SPEED_WEIGHTS, k=num_tasks)
+            task_list = random.choices(categories, weights=cat_weights, k=num_tasks)
+            # Deduplicate consecutive same types
+            task_list = [task_list[0]] + [t for i, t in enumerate(task_list[1:]) if t != task_list[i]]
+            speed_list_raw = random.choices(SPEED_LABELS, weights=SPEED_WEIGHTS, k=len(task_list))
+            speed_list = [
+                ("normal_silent" if random.random() < 0.5 else "normal") if s == "normal" else s
+                for s in speed_list_raw
+            ]
 
             backend = "indextts" if idx < total // 2 else "breezyvoice"
             turns = gen_if_control_dialogue(client, cfg, task_list, speed_list)

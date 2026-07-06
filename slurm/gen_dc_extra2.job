@@ -1,0 +1,117 @@
+#!/bin/bash
+#SBATCH -J gen_dc_extra2
+#SBATCH -A mst113234
+#SBATCH -p dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32G
+#SBATCH --time=04:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_dc_extra2_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_dc_extra2_%j.err
+
+# Fills DC gap after n=2 English filter.
+# gen_dc_extra used general [1000,1049), TW [1000,1098)
+# This shard:   general [1049,1112), TW [1098,1224)
+# Total: 41*63 + 4*126 = 3087 dlg → ~59.6h net
+
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
+CONFIG=$REPO/conf/daily_conv.yaml
+OUTPUT=$REPO/output/daily_conv
+
+NUM_GENERAL=63
+NUM_TW=126
+OFFSET_GENERAL=1049
+OFFSET_TW=1098
+TW_START=41
+
+TOPICS=(
+    "藝術" "書籍" "汽車" "名人" "程式設計" "烹飪" "教育" "活動與展覽"
+    "時尚" "健身" "財經" "美食" "電玩遊戲" "園藝" "健康" "歷史"
+    "嗜好" "假期旅遊" "居家生活" "語言學習" "彩妝" "電影" "音樂"
+    "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
+    "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
+    "傳統文化" "旅遊" "天氣" "工作職場"
+    "台灣文化" "台灣旅遊" "台灣社會" "台灣民俗信仰"
+)
+
+mkdir -p $REPO/logs $OUTPUT
+
+ENDPOINTS_STR=""
+for attempt in $(seq 1 60); do
+    ENDPOINTS_STR=$(python3 -c "
+import json, glob
+files = glob.glob('$REPO/logs/vllm_node_*.json')
+pairs = []
+for f in files:
+    try:
+        d = json.load(open(f))
+        for p in d['ports']:
+            pairs.append(f'{d[\"host\"]}:{p}')
+    except: pass
+print(' '.join(pairs))
+")
+    [ -n "$ENDPOINTS_STR" ] && break
+    echo "Waiting for vLLM endpoint files... (attempt $attempt)"
+    sleep 10
+done
+[ -z "$ENDPOINTS_STR" ] && echo "ERROR: no vLLM endpoints found" && exit 1
+
+ENDPOINTS=($ENDPOINTS_STR)
+N_INSTANCES=${#ENDPOINTS[@]}
+
+echo "============================================================"
+echo "Job: gen_dc_extra2  JobID: $SLURM_JOB_ID"
+echo "vLLM endpoints ($N_INSTANCES): ${ENDPOINTS[*]}"
+echo "Topics: ${#TOPICS[@]}  shard: general+$NUM_GENERAL@$OFFSET_GENERAL  TW+$NUM_TW@$OFFSET_TW"
+echo "Start: $(date)"
+echo "============================================================"
+
+for ENDPOINT in "${ENDPOINTS[@]}"; do
+    for i in $(seq 1 90); do
+        curl -s --connect-timeout 3 "http://${ENDPOINT}/health" > /dev/null 2>&1 && \
+            echo "  $ENDPOINT ready" && break
+        [ $i -eq 90 ] && echo "WARN: $ENDPOINT not ready, continuing anyway"
+        sleep 10
+    done
+done
+
+gen_topic_extra() {
+    local IDX="$1" TOPIC="$2" N="$3" OFFSET="$4"
+    local EP_ARR=($ENDPOINTS_STR)
+    local EP="${EP_ARR[$(( IDX % N_INSTANCES ))]}"
+    echo "[$(date +%H:%M:%S)] START $TOPIC  offset=$OFFSET n=$N → $EP"
+    $PYTHON $REPO/generate/gen_daily_conv.py \
+        --config "$CONFIG" \
+        --topic "$TOPIC" \
+        --num-scenarios $N \
+        --scenario-offset $OFFSET \
+        --output "$OUTPUT" \
+        --vllm-url "http://${EP}/v1" \
+        >> "$REPO/logs/gen_dc_extra2_${TOPIC}.log" 2>&1
+    echo "[$(date +%H:%M:%S)] DONE  $TOPIC"
+}
+export -f gen_topic_extra
+export PYTHON CONFIG OUTPUT REPO N_INSTANCES ENDPOINTS_STR
+
+ARGS=()
+for IDX in "${!TOPICS[@]}"; do
+    TOPIC="${TOPICS[$IDX]}"
+    if [ "$IDX" -ge "$TW_START" ]; then
+        ARGS+=("$IDX|$TOPIC|$NUM_TW|$OFFSET_TW")
+    else
+        ARGS+=("$IDX|$TOPIC|$NUM_GENERAL|$OFFSET_GENERAL")
+    fi
+done
+
+printf '%s\n' "${ARGS[@]}" \
+    | xargs -P ${#TOPICS[@]} -I{} bash -c '
+        IFS="|" read -r IDX TOPIC N OFFSET <<< "$1"
+        gen_topic_extra "$IDX" "$TOPIC" "$N" "$OFFSET"
+    ' _ {}
+
+echo "============================================================"
+echo "gen_dc_extra2 done. End: $(date)"
+echo "============================================================"

@@ -12,7 +12,7 @@ REPO = Path(__file__).parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "generate"))
 
-MODEL_PATH = "/work/jaylin0418/model_merging/models/Qwen2.5-7B-Instruct"
+MODEL_PATH = "/work/jaylin0418/models/Qwen2.5-32B-Instruct"
 OUT_DIR = REPO / "preview_output"
 N_SAMPLES = 5
 DIVIDER = "=" * 70
@@ -36,7 +36,8 @@ class LocalQwenClient:
         print("Model loaded.", flush=True)
 
     def chat(self, messages: list[dict], temperature: float = 0.85,
-             top_p: float = 0.9, max_tokens: int = 2048) -> str:
+             top_p: float = 0.9, max_tokens: int = 2048,
+             repetition_penalty: float = 1.05) -> str:
         import torch
         text = self.tok.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -49,6 +50,7 @@ class LocalQwenClient:
                 temperature=temperature,
                 top_p=top_p,
                 do_sample=True,
+                repetition_penalty=repetition_penalty,
                 pad_token_id=self.tok.eos_token_id,
             )
         generated = out[0][inputs["input_ids"].shape[1]:]
@@ -96,8 +98,8 @@ def print_sample(idx: int, type_name: str, system_prompt: str,
     for t in turns:
         role = t.get("role", "?")
         text = t.get("text", "")
-        speed = t.get("speed", "normal")
-        speed_tag = f"[{speed}] " if speed and speed != "normal" else ""
+        speed = t.get("speed", "")
+        speed_tag = f"(speed: {speed}) " if speed and speed != "normal" else ""
         lines.append(f"  {role}：{speed_tag}{text}")
     output = "\n".join(lines)
     print(output)
@@ -119,7 +121,7 @@ def run_preview(type_name: str, fn, *args, **kwargs):
 
 # ── Type 1: user_agent ────────────────────────────────────────────────────────
 
-def preview_user_agent(client, n=N_SAMPLES):
+def preview_user_agent(client, n=N_SAMPLES, fix_client=None, b_client=None):
     from generate.gen_user_agent import gen_scenarios, gen_system_prompt, gen_dialogue
     cfg = load_cfg("user_agent")
     topics = cfg["topics"]
@@ -132,13 +134,14 @@ def preview_user_agent(client, n=N_SAMPLES):
         sc = scenarios[0]
         sys_prompt = gen_system_prompt(client, cfg, sc["description"])
         num_turns = random.choice(range(8, 17, 2))
-        turns = gen_dialogue(client, cfg, sc["description"], sys_prompt, num_turns)
+        turns = gen_dialogue(client, cfg, sc["description"], sys_prompt, num_turns,
+                             fix_client=fix_client, b_client=b_client or client)
         print_sample(i, "user_agent", sys_prompt, turns, extra=f"topic={topic}")
 
 
 # ── Type 2: daily_conv ────────────────────────────────────────────────────────
 
-def preview_daily_conv(client, n=N_SAMPLES):
+def preview_daily_conv(client, n=N_SAMPLES, fix_client=None):
     # gen_daily_conv re-exports from gen_user_agent; import directly
     from generate.gen_user_agent import gen_scenarios, gen_system_prompt, gen_dialogue
     cfg = load_cfg("daily_conv")
@@ -152,30 +155,30 @@ def preview_daily_conv(client, n=N_SAMPLES):
         sc = scenarios[0]
         sys_prompt = gen_system_prompt(client, cfg, sc["description"])
         num_turns = random.choice(range(8, 17, 2))
-        turns = gen_dialogue(client, cfg, sc["description"], sys_prompt, num_turns)
+        turns = gen_dialogue(client, cfg, sc["description"], sys_prompt, num_turns,
+                             fix_client=fix_client)
         print_sample(i, "daily_conv", sys_prompt, turns, extra=f"topic={topic}")
 
 
 # ── Type 3: if_data ───────────────────────────────────────────────────────────
 
 def preview_if_data(client, n=N_SAMPLES):
-    from generate.gen_if_data import gen_if_dialogue
+    from generate.gen_if_data import gen_if_dialogue, QTYPES, QTYPE_WEIGHT_LIST
     cfg = load_cfg("if_data")
-    categories = [c["name"] for c in cfg["if_categories"]]
     min_tasks = cfg.get("min_tasks", 3)
     max_tasks = cfg.get("max_tasks", 6)
     print(f"\n{'#'*70}\nTYPE 3: if_data (Instruction Following)\n{'#'*70}")
     for i in range(n):
         num_tasks = random.randint(min_tasks, max_tasks)
-        task_list = random.sample(categories, min(num_tasks, len(categories)))
-        turns = gen_if_dialogue(client, cfg, task_list)
-        if not turns:
+        qtypes = random.choices(QTYPES, weights=QTYPE_WEIGHT_LIST, k=num_tasks)
+        qtypes = [qtypes[0]] + [q for j, q in enumerate(qtypes[1:]) if q != qtypes[j]]
+        result = gen_if_dialogue(client, cfg, qtypes)
+        if not result:
             print(f"  [Sample {i+1}] failed, skip"); continue
-        # IF data has no separate system_prompt (the prompt is embedded)
         turns_with_speed = [{"role": t["role"], "text": t["text"], "speed": "normal"}
-                            for t in turns]
-        print_sample(i, "if_data", "", turns_with_speed,
-                     extra=f"tasks={task_list}")
+                            for t in result["turns"]]
+        print_sample(i, "if_data", result["system_prompt"], turns_with_speed,
+                     extra=f"tasks={qtypes}")
 
 
 # ── Type 4: speed_ua ──────────────────────────────────────────────────────────
@@ -185,7 +188,6 @@ def preview_speed_ua(client, n=N_SAMPLES):
     from generate.gen_speed_control import apply_speed_fsm
     cfg_speed = load_cfg("speed_control")
     cfg_ua = load_cfg("user_agent")
-    # speed_control adds fsm section; UA provides the prompt templates
     cfg = {**cfg_ua, **cfg_speed}
     topics = cfg["topics"]
     fsm_cfg = cfg.get("fsm", {})
@@ -199,35 +201,11 @@ def preview_speed_ua(client, n=N_SAMPLES):
         sys_prompt = gen_system_prompt(client, cfg_ua, sc["description"])
         num_turns = random.choice(range(8, 17, 2))
         turns = gen_dialogue(client, cfg_ua, sc["description"], sys_prompt, num_turns)
-        turns = apply_speed_fsm(turns, fsm_cfg)
+        turns = apply_speed_fsm(turns, fsm_cfg, client=client)
         print_sample(i, "speed_ua", sys_prompt, turns, extra=f"topic={topic}")
 
 
-# ── Type 5: speed_daily ───────────────────────────────────────────────────────
-
-def preview_speed_daily(client, n=N_SAMPLES):
-    from generate.gen_user_agent import gen_scenarios, gen_system_prompt, gen_dialogue
-    from generate.gen_speed_control import apply_speed_fsm
-    cfg_speed = load_cfg("speed_control")
-    cfg_daily = load_cfg("daily_conv")
-    cfg = {**cfg_daily, **cfg_speed}
-    topics = cfg["topics"]
-    fsm_cfg = cfg.get("fsm", {})
-    print(f"\n{'#'*70}\nTYPE 5: speed_daily\n{'#'*70}")
-    for i in range(n):
-        topic = random.choice(topics)
-        scenarios = gen_scenarios(client, cfg_daily, topic, 1)
-        if not scenarios:
-            print(f"  [Sample {i+1}] failed, skip"); continue
-        sc = scenarios[0]
-        sys_prompt = gen_system_prompt(client, cfg_daily, sc["description"])
-        num_turns = random.choice(range(8, 17, 2))
-        turns = gen_dialogue(client, cfg_daily, sc["description"], sys_prompt, num_turns)
-        turns = apply_speed_fsm(turns, fsm_cfg)
-        print_sample(i, "speed_daily", sys_prompt, turns, extra=f"topic={topic}")
-
-
-# ── Type 6: if_control ────────────────────────────────────────────────────────
+# ── Type 5: if_control ────────────────────────────────────────────────────────
 
 def preview_if_control(client, n=N_SAMPLES):
     from generate.gen_if_control import (
@@ -236,15 +214,24 @@ def preview_if_control(client, n=N_SAMPLES):
     )
     cfg = load_cfg("if_control")
     raw = cfg["if_categories"]
-    # if_control.yaml has plain strings; if_data.yaml has dicts with "name"
-    categories = [c if isinstance(c, str) else c["name"] for c in raw]
+    if isinstance(raw, dict):
+        categories = list(raw.keys())
+        cat_weights = list(raw.values())
+    else:
+        categories = list(raw)
+        cat_weights = None
     min_tasks = cfg.get("min_tasks", 3)
     max_tasks = cfg.get("max_tasks", 6)
-    print(f"\n{'#'*70}\nTYPE 6: if_control (IF + Speed Control)\n{'#'*70}")
+    print(f"\n{'#'*70}\nTYPE 5: if_control (IF + Speed Control)\n{'#'*70}")
     for i in range(n):
         num_tasks = random.randint(min_tasks, max_tasks)
-        task_list = random.sample(categories, min(num_tasks, len(categories)))
-        speed_list = random.choices(SPEED_LABELS, weights=SPEED_WEIGHTS, k=num_tasks)
+        task_list = random.choices(categories, weights=cat_weights, k=num_tasks)
+        task_list = [task_list[0]] + [t for j, t in enumerate(task_list[1:]) if t != task_list[j]]
+        speed_list_raw = random.choices(SPEED_LABELS, weights=SPEED_WEIGHTS, k=len(task_list))
+        speed_list = [
+            ("normal_silent" if random.random() < 0.5 else "normal") if s == "normal" else s
+            for s in speed_list_raw
+        ]
         turns = gen_if_control_dialogue(client, cfg, task_list, speed_list)
         if not turns:
             print(f"  [Sample {i+1}] failed, skip"); continue
@@ -255,16 +242,41 @@ def preview_if_control(client, n=N_SAMPLES):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    random.seed(42)
-    client = LocalQwenClient(MODEL_PATH)
+ALL_TYPES = {
+    "user_agent":   ("type1_user_agent",  preview_user_agent),
+    "daily_conv":   ("type2_daily_conv",  preview_daily_conv),
+    "if_data":      ("type3_if_data",     preview_if_data),
+    "speed_ua":     ("type4_speed_ua",    preview_speed_ua),
+    "if_control":   ("type5_if_control",  preview_if_control),
+}
 
-    run_preview("type1_user_agent",   preview_user_agent,   client)
-    run_preview("type2_daily_conv",   preview_daily_conv,   client)
-    run_preview("type3_if_data",      preview_if_data,      client)
-    run_preview("type4_speed_ua",     preview_speed_ua,     client)
-    run_preview("type5_speed_daily",  preview_speed_daily,  client)
-    run_preview("type6_if_control",   preview_if_control,   client)
+OPENAI_TYPES = {"if_data", "speed_ua", "if_control"}
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Preview dialogue samples")
+    parser.add_argument("--types", nargs="+", choices=list(ALL_TYPES.keys()),
+                        default=list(ALL_TYPES.keys()),
+                        help="Which data types to preview (default: all)")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    random.seed(args.seed)
+
+    needs_local  = any(t not in OPENAI_TYPES for t in args.types)
+
+    local_client  = LocalQwenClient(MODEL_PATH) if needs_local  else None
+    from generate.base_generator import OpenAIClient
+    openai_client = OpenAIClient(model="gpt-4o")
+    print("OpenAI client ready (gpt-4o).", flush=True)
+
+    for type_key in args.types:
+        fname, fn = ALL_TYPES[type_key]
+        if type_key in OPENAI_TYPES:
+            run_preview(fname, fn, openai_client)
+        else:
+            run_preview(fname, fn, local_client, fix_client=openai_client)
 
     print(f"\n{DIVIDER}\nAll previews done.")
     print(f"輸出目錄：{OUT_DIR}")

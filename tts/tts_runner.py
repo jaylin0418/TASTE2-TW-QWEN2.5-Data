@@ -31,6 +31,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -260,6 +261,80 @@ def concat_wavs(wav_paths: list[str], silence_sec: float, out_path: str,
     return len(full) / sr
 
 
+# ── Language quality gate ─────────────────────────────────────────────────────
+
+def _is_cjk(cp: int) -> bool:
+    return (
+        0x4E00 <= cp <= 0x9FFF or   # CJK Unified Ideographs
+        0x3400 <= cp <= 0x4DBF or   # CJK Extension A
+        0x20000 <= cp <= 0x2A6DF or # CJK Extension B
+        0xF900 <= cp <= 0xFAFF or   # CJK Compatibility
+        0x2E80 <= cp <= 0x2EFF or   # CJK Radicals Supplement
+        0x2F00 <= cp <= 0x2FDF or   # Kangxi Radicals
+        0x3000 <= cp <= 0x303F or   # CJK Symbols and Punctuation
+        0x3100 <= cp <= 0x312F or   # Bopomofo
+        0x31A0 <= cp <= 0x31BF      # Bopomofo Extended
+    )
+
+
+def _has_foreign_script(turns: list[dict], strict: bool = False) -> bool:
+    """Return True if any turn contains foreign-script text.
+
+    strict=False (UA/DC):
+      - Non-ASCII non-CJK alphabetic chars (Vietnamese, Thai, etc.): 2+ consecutive → reject.
+      - ASCII Latin (English): token-level, 2+ consecutive English-dominant tokens → reject.
+        Single abbreviations like GDP/App/AI are allowed.
+
+    strict=True (IF data):
+      - Any 2+ consecutive non-CJK alphabetic characters → reject.
+        No abbreviation allowance; even GDP/App cause rejection.
+    """
+    import re as _re
+    _tok_split = _re.compile(r'[\s,;.!?\"\'.。，；！？、：]+')
+
+    for turn in turns:
+        text = turn.get("text", "")
+
+        if strict:
+            # Single rule: any 2+ consecutive non-CJK alphabetic chars
+            consec = 0
+            for ch in text:
+                cp = ord(ch)
+                if unicodedata.category(ch).startswith("L") and not _is_cjk(cp):
+                    consec += 1
+                    if consec >= 2:
+                        return True
+                else:
+                    consec = 0
+        else:
+            # Rule 1: non-ASCII non-CJK chars (Vietnamese, Thai, Arabic, kana, etc.)
+            consec = 0
+            for ch in text:
+                cp = ord(ch)
+                if (unicodedata.category(ch).startswith("L")
+                        and not _is_cjk(cp) and not ch.isascii()):
+                    consec += 1
+                    if consec >= 2:
+                        return True
+                else:
+                    consec = 0
+
+            # Rule 2: ASCII Latin — word-token level (allows single abbreviations)
+            consec = 0
+            for tok in _tok_split.split(text):
+                if not tok:
+                    continue
+                ascii_alpha = sum(1 for c in tok if c.isascii() and c.isalpha())
+                if ascii_alpha >= 2 and ascii_alpha / max(len(tok), 1) > 0.6:
+                    consec += 1
+                    if consec >= 2:
+                        return True
+                else:
+                    consec = 0
+
+    return False
+
+
 # ── Per-dialogue processing ───────────────────────────────────────────────────
 
 INDEXTTS_CV_RATIO = 0.30   # 30% Common Voice, 70% eleven_lab for IndexTTS-2
@@ -284,13 +359,18 @@ def process_dialogue(
     if not turns:
         return None
 
+    dtype = record.get("type", "")
+    if _has_foreign_script(turns, strict=(dtype == "if_data")):
+        logger.debug(f"[{dlg_id}] skipped: foreign script detected")
+        return None
+
     dlg_out_dir = out_dir / dlg_id
     dlg_out_dir.mkdir(parents=True, exist_ok=True)
     done_flag = dlg_out_dir / "done.flag"
     if done_flag.exists():
         meta_path = dlg_out_dir / "meta.json"
         if meta_path.exists():
-            return json.loads(meta_path.read_text())
+            return json.loads(meta_path.read_text(encoding="utf-8"))
         return None
 
     rng = random.Random(dlg_id)
@@ -298,6 +378,7 @@ def process_dialogue(
 
     # Synthesize
     turn_wav_paths: list[Path | None] = []
+    turn_ref_list: list[dict] = []  # per-turn ref audio info
 
     if backend == "indextts":
         if tts_model is None:
@@ -313,18 +394,20 @@ def process_dialogue(
 
         for i, turn in enumerate(turns):
             role = turn["role"]
-            raw_wav = dlg_out_dir / f"turn_{i:03d}_raw.wav"
-            if not raw_wav.exists():
+            turn_wav = dlg_out_dir / f"turn_{i:03d}.wav"
+            if not turn_wav.exists():
                 try:
                     synth_indextts(tts_model, turn["text"],
-                                   role_refs[role]["wav_abs"], str(raw_wav))
+                                   role_refs[role]["wav_abs"], str(turn_wav))
                 except Exception as e:
                     logger.error(f"{dlg_id} turn {i}: {e}")
                     return None
-            turn_wav_paths.append(raw_wav)
+            turn_wav_paths.append(turn_wav)
+            turn_ref_list.append(role_refs[role])
 
-    else:  # breezyvoice — 100% Common Voice, random per turn
-        turn_refs = [rng.choice(cv_pool) for _ in turns]
+    else:  # breezyvoice — fixed speaker per role for the whole dialogue
+        breezy_role_refs: dict[str, dict] = {role: rng.choice(cv_pool) for role in roles}
+        turn_refs = [breezy_role_refs[turn["role"]] for turn in turns]
         raw_paths = synth_breezyvoice_batch(
             turns, turn_refs,
             dlg_out_dir, breezy_repo, breezy_python, breezy_model,
@@ -332,38 +415,37 @@ def process_dialogue(
         if any(p is None for p in raw_paths):
             logger.warning(f"{dlg_id}: some BreezyVoice turns failed")
         turn_wav_paths = raw_paths
+        turn_ref_list = turn_refs
 
-    # Apply speed stretch and compute timestamps
+    # Compute timestamps using raw TTS output (no speed stretching)
     turn_meta = []
-    stretched_wavs = []
+    turn_wavs = []
     timestamp = 0.0
 
-    for i, (turn, raw_wav) in enumerate(zip(turns, turn_wav_paths)):
-        if raw_wav is None or not raw_wav.exists():
+    for i, (turn, turn_wav) in enumerate(zip(turns, turn_wav_paths)):
+        if turn_wav is None or not turn_wav.exists():
             logger.warning(f"{dlg_id} turn {i}: missing wav, skipping")
             continue
 
-        speed = turn.get("speed", "normal")
-        stretched = dlg_out_dir / f"turn_{i:03d}_stretched.wav"
-        if not stretched.exists():
-            stretch_wav(str(raw_wav), str(stretched), speed, fast_factor, slow_factor)
-
-        audio, audio_sr = sf.read(str(stretched), dtype="float32")
+        ref = turn_ref_list[i] if i < len(turn_ref_list) else {}
+        audio, audio_sr = sf.read(str(turn_wav), dtype="float32")
         duration = len(audio) / audio_sr
         turn_meta.append({
             **turn,
-            "wav": str(stretched.relative_to(out_dir.parent)),
+            "ref_wav": ref.get("wav", ref.get("wav_abs", "")),
+            "ref_speaker_id": ref.get("speaker_id", ""),
+            "wav": str(turn_wav.relative_to(out_dir.parent)),
             "timestamp_start": round(timestamp, 3),
             "timestamp_end": round(timestamp + duration, 3),
         })
-        stretched_wavs.append(str(stretched))
+        turn_wavs.append(str(turn_wav))
         timestamp += duration + SILENCE_SEC
 
-    if not stretched_wavs:
+    if not turn_wavs:
         return None
 
     full_wav = dlg_out_dir / "full.wav"
-    total_dur = concat_wavs(stretched_wavs, SILENCE_SEC, str(full_wav), SAMPLE_RATE)
+    total_dur = concat_wavs(turn_wavs, SILENCE_SEC, str(full_wav), SAMPLE_RATE)
 
     result = {
         **record,
@@ -372,25 +454,105 @@ def process_dialogue(
         "total_duration_sec": round(total_dur, 2),
     }
     (dlg_out_dir / "meta.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2))
+        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     done_flag.touch()
     return result
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _slice_records(records: list, worker_id: int, num_workers: int) -> list:
+    # Interleaved assignment so remainder is spread across all workers evenly
+    return records[worker_id::num_workers]
+
+
+def _wait_for_flag(flag_path: Path, max_wait: int, label: str) -> bool:
+    import time
+    waited = 0
+    while not flag_path.exists():
+        if waited >= max_wait:
+            logger.warning(f"Timeout waiting for {label} after {max_wait}s")
+            return False
+        logger.info(f"[worker] waiting for {label} ({waited}s)")
+        time.sleep(30)
+        waited += 30
+    return True
+
+
+def _process_topic(topic_input: Path, topic_output: Path, cfg: dict,
+                   cv_pool, eleven_lab_pool, tts_model_ref: list,
+                   breezy_repo, breezy_python, breezy_model,
+                   fast_factor, slow_factor,
+                   worker_id: int, num_workers: int,
+                   indextts_dir: str,
+                   extra_inputs: list = None) -> None:
+    # Collect records from topic_input and any extra shard files
+    all_files = [topic_input] + (extra_inputs or [])
+    records = []
+    for f in all_files:
+        for l in Path(f).read_text(encoding="utf-8").splitlines():
+            if l.strip():
+                records.append(json.loads(l))
+    my_records = _slice_records(records, worker_id, num_workers)
+    if not my_records:
+        return
+
+    # Lazy-load IndexTTS on first encounter
+    if tts_model_ref[0] is None:
+        if any(r.get("tts_backend") == "indextts" for r in my_records):
+            logger.info("Loading IndexTTS-2 (first indextts dialogue)...")
+            tts_model_ref[0] = load_indextts(indextts_dir)
+            logger.info("IndexTTS-2 ready.")
+
+    topic_output.mkdir(parents=True, exist_ok=True)
+    out_jsonl = topic_output / f"tts_output_w{worker_id:04d}.jsonl"
+    done_ids = set()
+    if out_jsonl.exists():
+        for l in out_jsonl.read_text(encoding="utf-8").splitlines():
+            if l.strip():
+                try:
+                    done_ids.add(json.loads(l)["id"])
+                except Exception:
+                    pass
+
+    with open(out_jsonl, "a", encoding="utf-8") as fout:
+        for i, record in enumerate(my_records):
+            if record.get("id") in done_ids:
+                continue
+            result = process_dialogue(
+                record, topic_output, cfg,
+                cv_pool, eleven_lab_pool, tts_model_ref[0],
+                breezy_repo, breezy_python, breezy_model,
+                fast_factor, slow_factor,
+            )
+            if result:
+                fout.write(json.dumps(result, ensure_ascii=False) + "\n")
+                fout.flush()
+            if i % 20 == 0:
+                logger.info(f"Worker {worker_id} [{topic_output.name}]: {i}/{len(my_records)} done")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True)
-    parser.add_argument("--output", required=True)
+    # ── Mode A: single topic (original, used by test_tts.job) ──────────────
+    parser.add_argument("--input", default=None)
+    parser.add_argument("--output", default=None)
+    # ── Mode B: persistent worker — all topics, model loaded once ──────────
+    parser.add_argument("--input-base", default=None,
+                        help="Base dir containing per-topic subdirs with dialogues.jsonl")
+    parser.add_argument("--output-base", default=None,
+                        help="Base dir for per-topic TTS output")
+    parser.add_argument("--topics", nargs="+", default=None,
+                        help="Ordered list of topics this worker should process")
+    parser.add_argument("--max-wait-secs", type=int, default=86400)
+    # ── Common ──────────────────────────────────────────────────────────────
     parser.add_argument("--config", default="conf/base.yaml")
-    parser.add_argument("--indextts-dir",
-                        default="/work/jaylin0418/cog-IndexTTS-2")
+    parser.add_argument("--indextts-dir", default="/work/jaylin0418/cog-IndexTTS-2")
     parser.add_argument("--cv-pool",
                         default="/work/jaylin0418/common_voice_zh_TW/pool/cv_pool.json")
     parser.add_argument("--ref-audio-dir",
-                        default="/home/jaylin0418/SpeechLab/ref_audio/eleven_lab_emotion",
-                        help="eleven_lab_emotion dir for IndexTTS-2 neutral ref (70%)")
+                        default="/home/jaylin0418/SpeechLab/ref_audio/eleven_lab_emotion")
+    parser.add_argument("--ref-pool", default=None)
     parser.add_argument("--breezy-repo",
                         default="/home/jaylin0418/SpeechLab/tts_model/BreezyVoice")
     parser.add_argument("--breezy-python",
@@ -402,55 +564,80 @@ def main():
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
-
     speed_cfg = cfg.get("speed", {})
     fast_factor = speed_cfg.get("fast_factor", 0.77)
     slow_factor = speed_cfg.get("slow_factor", 1.33)
 
-    cv_pool = load_cv_pool(args.cv_pool)
-    logger.info(f"Common Voice pool: {len(cv_pool)} speakers")
-    eleven_lab_pool = load_eleven_lab_neutral(Path(args.ref_audio_dir))
-    logger.info(f"eleven_lab neutral pool: {len(eleven_lab_pool)} files")
+    if args.ref_pool:
+        cv_pool = load_cv_pool(args.ref_pool)
+        eleven_lab_pool = cv_pool
+        logger.info(f"Custom ref pool: {len(cv_pool)} files")
+    else:
+        cv_pool = load_cv_pool(args.cv_pool)
+        eleven_lab_pool = load_eleven_lab_neutral(Path(args.ref_audio_dir))
 
-    out_dir = Path(args.output)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    tts_model_ref = [None]  # mutable ref for lazy load
 
-    records = []
-    with open(args.input) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-
-    per_worker = len(records) // args.num_workers
-    start = args.worker_id * per_worker
-    end = start + per_worker if args.worker_id < args.num_workers - 1 else len(records)
-    my_records = records[start:end]
-    logger.info(f"Worker {args.worker_id}: {len(my_records)} dialogues")
-
-    needs_indextts = any(r.get("tts_backend") == "indextts" for r in my_records)
-    tts_model = None
-    if needs_indextts:
-        logger.info("Loading IndexTTS-2...")
-        tts_model = load_indextts(args.indextts_dir)
-        logger.info("IndexTTS-2 ready.")
-
-    out_jsonl = out_dir / f"tts_output_w{args.worker_id:02d}.jsonl"
-    with open(out_jsonl, "a", encoding="utf-8") as fout:
-        for i, record in enumerate(my_records):
-            result = process_dialogue(
-                record, out_dir, cfg,
-                cv_pool, eleven_lab_pool, tts_model,
+    if args.input_base and args.topics:
+        # ── Mode B: persistent worker ──────────────────────────────────────
+        logger.info(f"Worker {args.worker_id}/{args.num_workers}: persistent mode, {len(args.topics)} topics")
+        input_base = Path(args.input_base)
+        output_base = Path(args.output_base)
+        for topic in args.topics:
+            done_flag = input_base / topic / "done.flag"
+            if not _wait_for_flag(done_flag, args.max_wait_secs, f"{topic}/done.flag"):
+                continue
+            # Support sharded gen: read all dialogues*.jsonl files
+            import glob as _glob
+            dialogue_files = sorted(_glob.glob(str(input_base / topic / "dialogues*.jsonl")))
+            if not dialogue_files:
+                logger.warning(f"No dialogues*.jsonl in {input_base / topic}, skipping")
+                continue
+            input_file = Path(dialogue_files[0])
+            extra_inputs = [Path(f) for f in dialogue_files[1:]]
+            logger.info(f"Worker {args.worker_id}: START {topic}")
+            _process_topic(
+                input_file, output_base / topic, cfg,
+                cv_pool, eleven_lab_pool, tts_model_ref,
                 args.breezy_repo, args.breezy_python, args.breezy_model,
                 fast_factor, slow_factor,
+                args.worker_id, args.num_workers,
+                args.indextts_dir,
+                extra_inputs=extra_inputs,
             )
-            if result:
-                fout.write(json.dumps(result, ensure_ascii=False) + "\n")
-                fout.flush()
-            if i % 20 == 0:
-                logger.info(f"Worker {args.worker_id}: {i}/{len(my_records)} done")
+            logger.info(f"Worker {args.worker_id}: DONE  {topic}")
+        logger.info(f"Worker {args.worker_id}: all topics finished.")
 
-    logger.info(f"Worker {args.worker_id}: finished.")
+    else:
+        # ── Mode A: single topic ───────────────────────────────────────────
+        if not args.input or not args.output:
+            raise ValueError("Either --input/--output (mode A) or --input-base/--output-base/--topics (mode B) required")
+
+        records = [json.loads(l) for l in Path(args.input).read_text(encoding="utf-8").splitlines() if l.strip()]
+        my_records = _slice_records(records, args.worker_id, args.num_workers)
+        logger.info(f"Worker {args.worker_id}: {len(my_records)} dialogues (mode A)")
+
+        if any(r.get("tts_backend") == "indextts" for r in my_records):
+            logger.info("Loading IndexTTS-2...")
+            tts_model_ref[0] = load_indextts(args.indextts_dir)
+
+        out_dir = Path(args.output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_jsonl = out_dir / f"tts_output_w{args.worker_id:02d}.jsonl"
+        with open(out_jsonl, "a", encoding="utf-8") as fout:
+            for i, record in enumerate(my_records):
+                result = process_dialogue(
+                    record, out_dir, cfg,
+                    cv_pool, eleven_lab_pool, tts_model_ref[0],
+                    args.breezy_repo, args.breezy_python, args.breezy_model,
+                    fast_factor, slow_factor,
+                )
+                if result:
+                    fout.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    fout.flush()
+                if i % 20 == 0:
+                    logger.info(f"Worker {args.worker_id}: {i}/{len(my_records)} done")
+        logger.info(f"Worker {args.worker_id}: finished.")
 
 
 if __name__ == "__main__":

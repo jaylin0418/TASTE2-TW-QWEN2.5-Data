@@ -1,0 +1,92 @@
+#!/bin/bash
+#SBATCH -J test_tts
+#SBATCH -A mst113025
+#SBATCH -p 8gpus
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=2
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=01:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/test_tts_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/test_tts_%j.err
+
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
+REF_POOL=$REPO/ref_audio/pool/ref_pool.json
+BREEZY_REPO=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice
+BREEZY_PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+BREEZY_MODEL=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
+N_GPU=2   # test with 2 GPUs (--num-workers 2)
+TEST_TOPICS=("烹飪" "科技" "台灣文化")
+
+mkdir -p $REPO/logs
+export PYTHONPATH=$INDEXTTS_DIR:$REPO:$PYTHONPATH
+
+echo "=============================="
+echo "test_tts  JobID: $SLURM_JOB_ID  Node: $SLURM_NODELIST"
+echo "GPUs: $N_GPU  Topics: ${TEST_TOPICS[*]}"
+echo "Start: $(date)"
+echo "=============================="
+
+# Build task list: ua/烹飪, dc/烹飪, ua/科技, dc/科技, ua/台灣文化, dc/台灣文化
+TASKS=()
+for TOPIC in "${TEST_TOPICS[@]}"; do
+    for TYPE in ua dc; do
+        TASKS+=("${TYPE}|${TOPIC}")
+    done
+done
+
+# Distribute tasks across GPUs (round-robin), each GPU runs its tasks sequentially
+for GPU_ID in $(seq 0 $((N_GPU - 1))); do
+    GPU_TASKS=()
+    for i in "${!TASKS[@]}"; do
+        [ $((i % N_GPU)) -eq $GPU_ID ] && GPU_TASKS+=("${TASKS[$i]}")
+    done
+    [ ${#GPU_TASKS[@]} -eq 0 ] && continue
+
+    (
+        for TASK in "${GPU_TASKS[@]}"; do
+            IFS="|" read -r TYPE TOPIC <<< "$TASK"
+            if [ "$TYPE" = "ua" ]; then INPUT_DIR="user_agent_test"; else INPUT_DIR="daily_conv_test"; fi
+            INPUT="$REPO/output/${INPUT_DIR}/${TOPIC}/dialogues.jsonl"
+            OUTPUT="$REPO/tts_output/${TYPE}_test/${TOPIC}"
+
+            if [ ! -f "$INPUT" ]; then
+                echo "[gpu $GPU_ID] missing $INPUT — SKIP"
+                continue
+            fi
+            mkdir -p "$OUTPUT"
+            N_RECORDS=$(wc -l < "$INPUT")
+            echo "[gpu $GPU_ID] $(date +%H:%M:%S) START ${TYPE}/${TOPIC} ($N_RECORDS dialogues)"
+
+            CUDA_VISIBLE_DEVICES=$GPU_ID $PYTHON $REPO/tts/tts_runner.py \
+                --input         "$INPUT" \
+                --output        "$OUTPUT" \
+                --config        $REPO/conf/base.yaml \
+                --indextts-dir  $INDEXTTS_DIR \
+                --ref-pool      $REF_POOL \
+                --breezy-repo   $BREEZY_REPO \
+                --breezy-python $BREEZY_PYTHON \
+                --breezy-model  $BREEZY_MODEL \
+                --worker-id     0 \
+                --num-workers   1 \
+                >> "$REPO/logs/test_tts_${TYPE}_${TOPIC}_gpu${GPU_ID}.log" 2>&1
+
+            echo "[gpu $GPU_ID] $(date +%H:%M:%S) DONE  ${TYPE}/${TOPIC} (exit $?)"
+        done
+    ) &
+done
+
+wait
+
+echo "=============================="
+echo "test_tts done. End: $(date)"
+echo ""
+echo "=== OUTPUTS TO REVIEW ==="
+for TYPE in ua dc; do
+    echo "--- ${TYPE} ---"
+    find $REPO/tts_output/${TYPE}_test -name "full.wav" 2>/dev/null | head -10
+done
+echo "========================="

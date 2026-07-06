@@ -1,0 +1,75 @@
+#!/bin/bash
+#SBATCH -J gen_text_test
+#SBATCH -A mst113025
+#SBATCH -p dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=24G
+#SBATCH --time=02:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_test_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_test_%j.err
+
+# ── USER CONFIGURATION ────────────────────────────────────────────────────────
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
+VLLM_PORT=8000
+VLLM_HOST=$(cat $REPO/logs/vllm_host.txt 2>/dev/null || echo "localhost")
+DATA_TYPE=user_agent
+CONFIG=$REPO/conf/${DATA_TYPE}.yaml
+OUTPUT=$REPO/output/${DATA_TYPE}_test
+NUM_SCENARIOS=1
+MAX_PARALLEL=10  # 最多同時跑幾個 topic worker
+# ─────────────────────────────────────────────────────────────────────────────
+
+mkdir -p $REPO/logs $OUTPUT
+
+TOPICS=(
+    "藝術" "書籍" "汽車" "名人" "程式設計" "烹飪" "教育" "活動與展覽"
+    "時尚" "健身" "財經" "美食" "電玩遊戲" "園藝" "健康" "歷史"
+    "嗜好" "假期旅遊" "居家生活" "語言學習" "彩妝" "電影" "音樂"
+    "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
+    "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
+    "傳統文化" "旅遊" "天氣" "工作職場"
+    "台灣文化" "台灣旅遊" "台灣社會" "台灣民俗信仰"
+)
+
+echo "=========================================="
+echo "Job: gen_text_test  JobID: $SLURM_JOB_ID"
+echo "vLLM: $VLLM_HOST:$VLLM_PORT  Topics: ${#TOPICS[@]}"
+echo "Start: $(date)"
+echo "=========================================="
+
+# Wait for vLLM server (max 10 min)
+echo "Waiting for vLLM at $VLLM_HOST:$VLLM_PORT ..."
+for i in $(seq 1 60); do
+    if curl -s --connect-timeout 3 "http://${VLLM_HOST}:${VLLM_PORT}/health" > /dev/null 2>&1; then
+        echo "vLLM ready (attempt $i)"; break
+    fi
+    [ $i -eq 60 ] && echo "ERROR: vLLM not ready after 10 min" && exit 1
+    sleep 10
+done
+
+# Run all topics in parallel, max MAX_PARALLEL at once
+run_topic() {
+    local TOPIC="$1"
+    echo "[$(date +%H:%M:%S)] START $TOPIC"
+    $PYTHON $REPO/generate/gen_user_agent.py \
+        --config "$CONFIG" \
+        --topic "$TOPIC" \
+        --num-scenarios "$NUM_SCENARIOS" \
+        --output "$OUTPUT" \
+        --vllm-url "http://${VLLM_HOST}:${VLLM_PORT}/v1" \
+        > "$REPO/logs/gen_test_${TOPIC}.log" 2>&1
+    echo "[$(date +%H:%M:%S)] DONE  $TOPIC (exit $?)"
+}
+export -f run_topic
+export PYTHON CONFIG NUM_SCENARIOS OUTPUT VLLM_HOST VLLM_PORT REPO
+
+printf '%s\n' "${TOPICS[@]}" | xargs -P "$MAX_PARALLEL" -I{} bash -c 'run_topic "$@"' _ {}
+
+echo "=========================================="
+echo "All topics done. End: $(date)"
+echo "Output: $OUTPUT"
+echo "=========================================="

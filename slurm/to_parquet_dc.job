@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH -J to_parquet_dc
+#SBATCH -A mst113234
+#SBATCH -p dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=04:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/to_parquet_dc_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/to_parquet_dc_%j.err
+#SBATCH --dependency=afterok:165429
+
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python3
+
+mkdir -p $REPO/logs $REPO/parquet/daily_conv
+
+echo "============================================================"
+echo "Job: to_parquet_dc  JobID: $SLURM_JOB_ID"
+echo "Start: $(date)"
+echo "============================================================"
+
+echo "--- Language filter: daily_conv ---"
+$PYTHON $REPO/scripts/filter_english_dialogues.py --type daily_conv
+echo ""
+
+echo "--- Language filter: daily_conv_remaining ---"
+$PYTHON $REPO/scripts/filter_english_dialogues.py --type daily_conv_remaining
+echo ""
+
+echo "--- to_parquet: daily_conv (Mode B, existing) ---"
+$PYTHON $REPO/to_parquet/to_parquet_v5.py \
+    --input  $REPO/tts_output/daily_conv \
+    --output $REPO/parquet/daily_conv \
+    --prefix daily_conv \
+    --chunk-gb 1.0
+echo ""
+
+echo "--- to_parquet: daily_conv_remaining (Mode A, new) ---"
+$PYTHON $REPO/to_parquet/to_parquet_v5.py \
+    --input  $REPO/tts_output/daily_conv_remaining \
+    --output $REPO/parquet/daily_conv \
+    --prefix daily_conv_rem \
+    --chunk-gb 1.0
+
+echo "============================================================"
+echo "to_parquet_dc done. End: $(date)"
+echo "============================================================"

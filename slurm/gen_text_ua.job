@@ -1,0 +1,143 @@
+#!/bin/bash
+#SBATCH -J gen_ua
+#SBATCH -A mst113025
+#SBATCH -p dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32G
+#SBATCH --time=04:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_ua_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_ua_%j.err
+
+# ── USER CONFIGURATION ────────────────────────────────────────────────────────
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
+CONFIG=$REPO/conf/user_agent.yaml
+OUTPUT=$REPO/output/user_agent
+NUM_SCENARIOS_GENERAL=356
+NUM_SCENARIOS_TW=712
+N_SHARDS=4        # sub-workers per topic; each shard generates 1/N_SHARDS of scenarios
+# ─────────────────────────────────────────────────────────────────────────────
+
+mkdir -p $REPO/logs $OUTPUT
+
+TOPICS=(
+    "藝術" "書籍" "汽車" "名人" "程式設計" "烹飪" "教育" "活動與展覽"
+    "時尚" "健身" "財經" "美食" "電玩遊戲" "園藝" "健康" "歷史"
+    "嗜好" "假期旅遊" "居家生活" "語言學習" "彩妝" "電影" "音樂"
+    "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
+    "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
+    "傳統文化" "旅遊" "天氣" "工作職場"
+    "台灣文化" "台灣旅遊" "台灣社會" "台灣民俗信仰"
+)
+TW_START=41
+
+# Discover vLLM endpoints
+ENDPOINTS_STR=""
+for attempt in $(seq 1 60); do
+    ENDPOINTS_STR=$(python3 -c "
+import json, glob
+files = glob.glob('$REPO/logs/vllm_node_*.json')
+pairs = []
+for f in files:
+    try:
+        d = json.load(open(f))
+        for p in d['ports']:
+            pairs.append(f'{d[\"host\"]}:{p}')
+    except: pass
+print(' '.join(pairs))
+")
+    [ -n "$ENDPOINTS_STR" ] && break
+    echo "Waiting for vLLM endpoint files... (attempt $attempt)"
+    sleep 10
+done
+[ -z "$ENDPOINTS_STR" ] && echo "ERROR: no vLLM endpoints found" && exit 1
+
+ENDPOINTS=($ENDPOINTS_STR)
+N_INSTANCES=${#ENDPOINTS[@]}
+
+echo "============================================================"
+echo "Job: gen_ua  JobID: $SLURM_JOB_ID"
+echo "vLLM endpoints ($N_INSTANCES): ${ENDPOINTS[*]}"
+echo "Topics: ${#TOPICS[@]}  N_SHARDS: $N_SHARDS"
+echo "Start: $(date)"
+echo "============================================================"
+
+for ENDPOINT in "${ENDPOINTS[@]}"; do
+    for i in $(seq 1 90); do
+        curl -s --connect-timeout 3 "http://${ENDPOINT}/health" > /dev/null 2>&1 && \
+            echo "  $ENDPOINT ready" && break
+        [ $i -eq 90 ] && echo "WARN: $ENDPOINT not ready, continuing anyway"
+        sleep 10
+    done
+done
+
+# Run one topic: launch N_SHARDS workers in parallel, then touch done.flag
+run_topic() {
+    local IDX="$1" TOPIC="$2" N_TOTAL="$3"
+    local TOPIC_DIR="$OUTPUT/$TOPIC"
+    mkdir -p "$TOPIC_DIR"
+
+    # Skip if already fully done
+    [ -f "$TOPIC_DIR/done.flag" ] && echo "[$(date +%H:%M:%S)] SKIP $TOPIC (done.flag exists)" && return
+
+    local PER=$(( N_TOTAL / N_SHARDS ))
+    local EP_ARR=($ENDPOINTS_STR)
+    local PIDS=()
+
+    for s in $(seq 0 $((N_SHARDS - 1))); do
+        local OFFSET=$(( s * PER ))
+        local COUNT=$PER
+        [ $s -eq $((N_SHARDS - 1)) ] && COUNT=$(( N_TOTAL - OFFSET ))
+        local EP="${EP_ARR[$(( (IDX * N_SHARDS + s) % N_INSTANCES ))]}"
+
+        echo "[$(date +%H:%M:%S)] START $TOPIC shard $s/$N_SHARDS (offset=$OFFSET n=$COUNT) → $EP"
+        $PYTHON $REPO/generate/gen_user_agent.py \
+            --config "$CONFIG" \
+            --topic "$TOPIC" \
+            --num-scenarios $COUNT \
+            --scenario-offset $OFFSET \
+            --output "$OUTPUT" \
+            --vllm-url "http://${EP}/v1" \
+            >> "$REPO/logs/gen_ua_${TOPIC}_s${s}.log" 2>&1 &
+        PIDS+=($!)
+    done
+
+    # Wait for all shards then write done.flag
+    local ALL_OK=1
+    for pid in "${PIDS[@]}"; do
+        wait $pid || ALL_OK=0
+    done
+
+    if [ $ALL_OK -eq 1 ]; then
+        touch "$TOPIC_DIR/done.flag"
+        echo "[$(date +%H:%M:%S)] DONE  $TOPIC"
+    else
+        echo "[$(date +%H:%M:%S)] WARN  $TOPIC some shards failed (check logs)"
+        # Still touch done.flag so TTS can proceed with partial data
+        touch "$TOPIC_DIR/done.flag"
+    fi
+}
+export -f run_topic
+export PYTHON CONFIG OUTPUT REPO N_INSTANCES N_SHARDS ENDPOINTS_STR
+
+# Build topic list with scenario counts
+ARGS=()
+for IDX in "${!TOPICS[@]}"; do
+    TOPIC="${TOPICS[$IDX]}"
+    N=$( [ "$IDX" -ge "$TW_START" ] && echo $NUM_SCENARIOS_TW || echo $NUM_SCENARIOS_GENERAL )
+    ARGS+=("$IDX|$TOPIC|$N")
+done
+
+# Run all topics concurrently (each topic internally parallelizes its N_SHARDS)
+printf '%s\n' "${ARGS[@]}" \
+    | xargs -P ${#TOPICS[@]} -I{} bash -c '
+        IFS="|" read -r IDX TOPIC N <<< "$1"
+        run_topic "$IDX" "$TOPIC" "$N"
+    ' _ {}
+
+echo "============================================================"
+echo "All topics done. End: $(date)"
+echo "============================================================"

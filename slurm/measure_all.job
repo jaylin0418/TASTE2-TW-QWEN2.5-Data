@@ -1,0 +1,302 @@
+#!/bin/bash
+#SBATCH -J measure_all
+#SBATCH -A mst113025
+#SBATCH -p 8gpus
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=400G
+#SBATCH --time=01:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/measure_all_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/measure_all_%j.err
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Measures peak VRAM for IndexTTS, BreezyVoice, vLLM(Qwen2.5-32B TP=1 vs TP=2)
+# to determine maximum safe N_PARALLEL_PER_GPU.
+#
+# GPU assignment:
+#   GPU 0 → IndexTTS tests
+#   GPU 1 → BreezyVoice tests
+#   GPU 2 → vLLM TP=1 test (single-GPU 32B)
+#   GPUs 2-3 → vLLM TP=2 test (baseline comparison)
+# ─────────────────────────────────────────────────────────────────────────────
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+VLLM_PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python
+INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
+REF_POOL=$REPO/ref_audio/pool/ref_pool.json
+REF_WAVS_DIR=$REPO/ref_audio/pool/wavs
+BREEZY_REPO=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice
+BREEZY_PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+BREEZY_MODEL=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
+MODEL_PATH=/work/jaylin0418/models/Qwen2.5-32B-Instruct
+WORK_DIR=$REPO/logs/measure_all_${SLURM_JOB_ID}
+mkdir -p $WORK_DIR
+
+export PYTHONPATH=$INDEXTTS_DIR:$REPO:$PYTHONPATH
+
+MEASURE_LOG=$WORK_DIR/gpu_samples.csv
+echo "timestamp,gpu_id,memory_used_MiB,memory_total_MiB,utilization_pct" > $MEASURE_LOG
+
+# Background GPU sampler (5s interval, no watch)
+(
+    while true; do
+        nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu \
+            --format=csv,noheader,nounits \
+            | awk -v ts="$(date +%H:%M:%S)" '{print ts","$0}' >> $MEASURE_LOG
+        sleep 5
+    done
+) &
+SAMPLER_PID=$!
+
+gpu_snapshot() {
+    local label="$1"
+    echo ""
+    echo "=== GPU snapshot: $label ==="
+    nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu \
+        --format=csv,noheader
+    echo ""
+}
+
+wait_procs() {
+    for pid in "$@"; do wait "$pid" 2>/dev/null; done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo "=========================================================="
+echo "Job: measure_all  JobID: $SLURM_JOB_ID  Node: $(hostname)"
+echo "Start: $(date)"
+echo "=========================================================="
+
+gpu_snapshot "baseline (no models)"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SECTION 1: IndexTTS on GPU 0
+# Each worker runs tts_runner.py Mode A on a different output dir (no sharing)
+# Test topic: user_agent/烹飪 (has indextts dialogues)
+# ──────────────────────────────────────────────────────────────────────────────
+ITTS_INPUT=$REPO/output/user_agent_test/烹飪/dialogues.jsonl
+# Fallback: use 科技 or 台灣文化 if 烹飪 not present
+[ ! -f "$ITTS_INPUT" ] && ITTS_INPUT=$REPO/output/user_agent_test/科技/dialogues.jsonl
+[ ! -f "$ITTS_INPUT" ] && ITTS_INPUT=$(ls $REPO/output/user_agent_test/*/dialogues.jsonl 2>/dev/null | head -1)
+
+run_indextts_worker() {
+    local W=$1
+    CUDA_VISIBLE_DEVICES=0 $PYTHON $REPO/tts/tts_runner.py \
+        --input  "$ITTS_INPUT" \
+        --output "$WORK_DIR/itts_w${W}" \
+        --config $REPO/conf/base.yaml \
+        --indextts-dir $INDEXTTS_DIR \
+        --ref-pool $REF_POOL \
+        --breezy-repo $BREEZY_REPO --breezy-python $BREEZY_PYTHON --breezy-model $BREEZY_MODEL \
+        --worker-id 0 --num-workers 1 \
+        >> $WORK_DIR/itts_w${W}.log 2>&1
+}
+
+for N_ITTS in 1 2 4 8; do
+    echo "--- IndexTTS: $N_ITTS workers on GPU 0 ---"
+    PIDS=()
+    for w in $(seq 0 $((N_ITTS - 1))); do
+        run_indextts_worker "$w" &
+        PIDS+=($!)
+    done
+    sleep 40   # wait for all workers to load model and start processing
+    gpu_snapshot "IndexTTS N=$N_ITTS (after 40s warm-up)"
+    wait_procs "${PIDS[@]}"
+    gpu_snapshot "IndexTTS N=$N_ITTS (after workers done)"
+    rm -rf $WORK_DIR/itts_w*  # clean up for next round
+    echo "[IndexTTS N=$N_ITTS done at $(date)]"
+done
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SECTION 2: BreezyVoice on GPU 1
+# Each concurrent worker calls batch_inference.py with its own CSV
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "=========================================================="
+echo "SECTION 2: BreezyVoice GPU 1"
+echo "=========================================================="
+
+# Build a small test CSV (4 rows; ref audio from pool)
+python3 - <<'PYEOF'
+import json, csv, os
+pool = json.load(open('/work/jaylin0418/TASTE2-TW-QWEN2.5-Data/ref_audio/pool/ref_pool.json'))
+work = os.environ['WORK_DIR']
+sentences = [
+    "今天天氣真的很好，適合出門走走。",
+    "我們來談談台灣的飲食文化吧，有很多特色美食。",
+    "科技進步讓我們的生活越來越方便，但也帶來一些問題。",
+    "學習語言需要持續練習，每天都要花時間複習。",
+    "這本書的內容非常豐富，值得花時間細細閱讀。",
+    "假日的時候我喜歡去爬山，呼吸新鮮空氣。",
+    "烹飪是一種藝術，需要用心和創意來表現。",
+    "台灣的夜市文化非常有特色，各地都有不同的小吃。",
+]
+ref = pool[0]
+rows = [
+    {
+        'speaker_prompt_audio_filename': ref['wav'].split('/')[-1],
+        'speaker_prompt_text_transcription': ref['sentence'],
+        'content_to_synthesize': s,
+        'output_audio_filename': f'breezy_test_{i:03d}.wav',
+    }
+    for i, s in enumerate(sentences)
+]
+csv_path = f"{work}/breezy_test.csv"
+with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+    writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+    writer.writeheader()
+    writer.writerows(rows)
+print(f"Wrote {len(rows)} rows to {csv_path}")
+PYEOF
+
+run_breezy_worker() {
+    local W=$1
+    local OUT=$WORK_DIR/breezy_w${W}
+    mkdir -p "$OUT"
+    CUDA_VISIBLE_DEVICES=1 $BREEZY_PYTHON batch_inference.py \
+        --csv_file              $WORK_DIR/breezy_test.csv \
+        --speaker_prompt_audio_folder  $REF_WAVS_DIR \
+        --output_audio_folder  "$OUT" \
+        --model_path           $BREEZY_MODEL \
+        >> $WORK_DIR/breezy_w${W}.log 2>&1
+}
+export -f run_breezy_worker
+export WORK_DIR BREEZY_PYTHON BREEZY_MODEL REF_WAVS_DIR
+
+for N_BREEZY in 1 2 4 8; do
+    echo "--- BreezyVoice: $N_BREEZY workers on GPU 1 ---"
+    PIDS=()
+    for w in $(seq 0 $((N_BREEZY - 1))); do
+        (cd $BREEZY_REPO && run_breezy_worker "$w") &
+        PIDS+=($!)
+    done
+    sleep 30   # wait for model loads
+    gpu_snapshot "BreezyVoice N=$N_BREEZY (after 30s warm-up)"
+    wait_procs "${PIDS[@]}"
+    gpu_snapshot "BreezyVoice N=$N_BREEZY (after workers done)"
+    rm -rf $WORK_DIR/breezy_w*
+    echo "[BreezyVoice N=$N_BREEZY done at $(date)]"
+done
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SECTION 3: vLLM Qwen2.5-32B  — TP=1 vs TP=2
+# Goal: see if TP=1 fits in 80GB H200 → if yes, 8 instances/node instead of 4
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "=========================================================="
+echo "SECTION 3: vLLM Qwen2.5-32B TP=1 vs TP=2"
+echo "=========================================================="
+export VLLM_USE_FLASHINFER_SAMPLER=0
+export TORCHINDUCTOR_CACHE_DIR=/work/jaylin0418/.cache/torch_inductor
+mkdir -p $TORCHINDUCTOR_CACHE_DIR
+
+# Test TP=1 on GPU 4 (clean GPU)
+echo "--- vLLM TP=1 on GPU 4 ---"
+CUDA_VISIBLE_DEVICES=4 $VLLM_PYTHON -m vllm.entrypoints.openai.api_server \
+    --model                "$MODEL_PATH" \
+    --tensor-parallel-size 1 \
+    --max-model-len        4096 \
+    --dtype                bfloat16 \
+    --port                 8100 \
+    --served-model-name    "Qwen/Qwen2.5-32B-Instruct" \
+    --enforce-eager \
+    --trust-remote-code \
+    >> $WORK_DIR/vllm_tp1.log 2>&1 &
+VLLM_TP1_PID=$!
+
+echo "Waiting 180s for TP=1 to load (or OOM)..."
+sleep 30
+gpu_snapshot "vLLM TP=1 loading (t=30s)"
+sleep 60
+gpu_snapshot "vLLM TP=1 loading (t=90s)"
+sleep 60
+gpu_snapshot "vLLM TP=1 loading (t=150s)"
+sleep 30
+
+# Check if still alive
+if kill -0 $VLLM_TP1_PID 2>/dev/null; then
+    echo "vLLM TP=1: ALIVE (did not OOM)"
+    gpu_snapshot "vLLM TP=1 FINAL (loaded)"
+    # Check if health endpoint responds
+    curl -s --connect-timeout 5 "http://localhost:8100/health" > /dev/null 2>&1 \
+        && echo "vLLM TP=1: /health OK — TP=1 is viable, can use 8 instances/node!" \
+        || echo "vLLM TP=1: still loading or port not ready"
+else
+    echo "vLLM TP=1: DIED (likely OOM) — check $WORK_DIR/vllm_tp1.log"
+    tail -20 $WORK_DIR/vllm_tp1.log
+fi
+kill $VLLM_TP1_PID 2>/dev/null
+sleep 10  # let GPU memory free
+
+# Test TP=2 on GPUs 4-5 (baseline comparison)
+echo ""
+echo "--- vLLM TP=2 on GPUs 4-5 (baseline) ---"
+CUDA_VISIBLE_DEVICES=4,5 $VLLM_PYTHON -m vllm.entrypoints.openai.api_server \
+    --model                "$MODEL_PATH" \
+    --tensor-parallel-size 2 \
+    --max-model-len        8192 \
+    --dtype                bfloat16 \
+    --port                 8101 \
+    --served-model-name    "Qwen/Qwen2.5-32B-Instruct" \
+    --enforce-eager \
+    --trust-remote-code \
+    >> $WORK_DIR/vllm_tp2.log 2>&1 &
+VLLM_TP2_PID=$!
+
+echo "Waiting 180s for TP=2 baseline..."
+sleep 30; gpu_snapshot "vLLM TP=2 loading (t=30s)"
+sleep 60; gpu_snapshot "vLLM TP=2 loading (t=90s)"
+sleep 60; gpu_snapshot "vLLM TP=2 loading (t=150s)"
+sleep 30
+
+if kill -0 $VLLM_TP2_PID 2>/dev/null; then
+    echo "vLLM TP=2: ALIVE"
+    gpu_snapshot "vLLM TP=2 FINAL (loaded)"
+    curl -s --connect-timeout 5 "http://localhost:8101/health" > /dev/null 2>&1 \
+        && echo "vLLM TP=2: /health OK" || echo "vLLM TP=2: still loading"
+else
+    echo "vLLM TP=2: DIED — check $WORK_DIR/vllm_tp2.log"
+fi
+kill $VLLM_TP2_PID 2>/dev/null
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ──────────────────────────────────────────────────────────────────────────────
+kill $SAMPLER_PID 2>/dev/null
+
+echo ""
+echo "=========================================================="
+echo "SUMMARY"
+echo "=========================================================="
+python3 - <<PYEOF
+import csv
+from collections import defaultdict
+
+rows = list(csv.reader(open('$MEASURE_LOG')))
+print(f'Total samples: {len(rows)-1}')
+if len(rows) > 1:
+    peak = defaultdict(int)
+    for r in rows[1:]:
+        try:
+            peak[r[1].strip()] = max(peak[r[1].strip()], int(r[2].strip()))
+        except:
+            pass
+    total_mib = 81559  # H200 80GB
+    print()
+    print('Peak VRAM per GPU (across entire job):')
+    for g, m in sorted(peak.items(), key=lambda x: int(x[0])):
+        free = total_mib - m
+        print(f'  GPU {g}: {m} MiB used / {total_mib} MiB total  ({free} MiB free)')
+    print()
+    print('H200 = 80 GiB = 81920 MiB')
+    print('Use 80% headroom: safe capacity = 65536 MiB per GPU')
+    print('IndexTTS per-worker VRAM ≈ peak(GPU0) / N at test; BreezyVoice ≈ peak(GPU1) / N')
+PYEOF
+
+echo ""
+echo "Full samples: $MEASURE_LOG"
+echo "vLLM TP=1 log: $WORK_DIR/vllm_tp1.log"
+echo "vLLM TP=2 log: $WORK_DIR/vllm_tp2.log"
+echo "End: $(date)"

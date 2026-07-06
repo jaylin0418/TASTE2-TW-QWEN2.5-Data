@@ -6,7 +6,7 @@
 vllm:
   base_url: "http://localhost:8000/v1"
   api_key: "token"
-  model: "Qwen/Qwen2.5-7B-Instruct"
+  model: "Qwen/Qwen2.5-32B-Instruct"
   timeout: 120
   max_retries: 5
   retry_delay: 2.0
@@ -16,13 +16,17 @@ gen:
   temperature: 0.85
   top_p: 0.9
   max_tokens: 2048
+  repetition_penalty: 1.15  # prevent loop repetition common in Qwen2.5-7B
 
 # ── Dialogue structure ───────────────────────────────────────────────────────
 dialogue:
   min_turns: 8
-  max_turns: 16          # 每次 random 取 8~16 的偶數
+  max_turns: 14          # 每次 random 取 8~14 的偶數
   max_chars_per_turn: 60 # 每輪最多 60 字
   max_tts_sec: 30        # 每輪 TTS 不超過 30 秒
+
+# ── Backchannel ──────────────────────────────────────────────────────────────
+backchannel_rate: 0.15  # 非首輪甲（User/甲）有此機率被強制短回應
 
 # ── TTS ─────────────────────────────────────────────────────────────────────
 tts:
@@ -92,7 +96,7 @@ topics:
   - 台灣文化
   - 台灣旅遊
   - 台灣社會
-  - 民俗信仰
+  - 台灣民俗信仰
 
 # ── Taiwan context hints (injected into prompts) ─────────────────────────────
 taiwan_hints: ""

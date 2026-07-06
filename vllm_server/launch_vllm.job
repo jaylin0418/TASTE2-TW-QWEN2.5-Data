@@ -1,46 +1,68 @@
 #!/bin/bash
 #SBATCH -J vllm_qwen25
-#SBATCH -A mst115022
+#SBATCH -A mst113025
 #SBATCH -p 8gpus
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=400G
 #SBATCH --time=48:00:00
 #SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/vllm_%j.out
 #SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/vllm_%j.err
 
 # ── USER CONFIGURATION ────────────────────────────────────────────────────────
-MODEL_PATH=/work/jaylin0418/model_merging/models/Qwen2.5-7B-Instruct
-PORT=8000
-TENSOR_PARALLEL=1
+MODEL_PATH=/work/jaylin0418/models/Qwen2.5-32B-Instruct
+BASE_PORT=8000
+TENSOR_PARALLEL=2
+N_INSTANCES=4          # 4 × TP=2 = 8 GPUs, ports 8000-8003
 MAX_MODEL_LEN=8192
-# vLLM env: bash vllm_server/install_vllm.sh 安裝一次
 VLLM_PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
 # ─────────────────────────────────────────────────────────────────────────────
 
-mkdir -p /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs
+mkdir -p $REPO/logs
 
-# Write hostname so gen_text workers can find this server
+export VLLM_USE_FLASHINFER_SAMPLER=0
+export TORCHINDUCTOR_CACHE_DIR=/work/jaylin0418/.cache/torch_inductor
+mkdir -p $TORCHINDUCTOR_CACHE_DIR
+
 NODE=$(hostname)
-echo "$NODE" > /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/vllm_host.txt
-echo "vLLM node: $NODE"
+
+# Write per-job endpoint file (gen jobs read all vllm_node_*.json)
+python3 -c "
+import json
+data = {'host': '$NODE', 'ports': list(range($BASE_PORT, $BASE_PORT + $N_INSTANCES))}
+open('$REPO/logs/vllm_node_${SLURM_JOB_ID}.json', 'w').write(json.dumps(data))
+"
 
 echo "=========================================="
-echo "Job: vLLM Qwen2.5-7B-Instruct"
-echo "Job ID: $SLURM_JOB_ID  Node: $SLURM_NODELIST"
+echo "Job: vLLM ×$N_INSTANCES  Node: $NODE  JobID: $SLURM_JOB_ID"
+echo "Ports: $BASE_PORT-$((BASE_PORT + N_INSTANCES - 1))  TP=$TENSOR_PARALLEL"
 echo "Start: $(date)"
 echo "=========================================="
 
-$VLLM_PYTHON -m vllm.entrypoints.openai.api_server \
-    --model "$MODEL_PATH" \
-    --tensor-parallel-size "$TENSOR_PARALLEL" \
-    --max-model-len "$MAX_MODEL_LEN" \
-    --dtype bfloat16 \
-    --port "$PORT" \
-    --served-model-name "Qwen/Qwen2.5-7B-Instruct" \
-    --enable-prefix-caching \
-    --trust-remote-code
+for i in $(seq 0 $((N_INSTANCES - 1))); do
+    PORT=$((BASE_PORT + i))
+    GPU_START=$((i * TENSOR_PARALLEL))
+    GPU_END=$((GPU_START + TENSOR_PARALLEL - 1))
+    GPUS=$(seq -s, $GPU_START $GPU_END)
 
-echo "End: $(date)"
+    echo "Starting instance $i: GPUs $GPUS  port $PORT"
+    CUDA_VISIBLE_DEVICES=$GPUS $VLLM_PYTHON -m vllm.entrypoints.openai.api_server \
+        --model                "$MODEL_PATH" \
+        --tensor-parallel-size "$TENSOR_PARALLEL" \
+        --max-model-len        "$MAX_MODEL_LEN" \
+        --dtype                bfloat16 \
+        --port                 "$PORT" \
+        --served-model-name    "Qwen/Qwen2.5-32B-Instruct" \
+        --enable-prefix-caching \
+        --enforce-eager \
+        --trust-remote-code \
+        >> $REPO/logs/vllm_instance${i}_${SLURM_JOB_ID}.log 2>&1 &
+done
+
+wait
+# Clean up endpoint file when job exits so gen jobs don't try dead endpoints
+rm -f $REPO/logs/vllm_node_${SLURM_JOB_ID}.json
+echo "All vLLM instances exited. End: $(date)"

@@ -1,0 +1,93 @@
+#!/bin/bash
+#SBATCH -J test_text
+#SBATCH -A mst113025
+#SBATCH -p dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --time=01:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/test_text_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/test_text_%j.err
+
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
+NUM_SCENARIOS=2
+TEST_TOPICS=("烹飪" "科技" "台灣文化")
+
+mkdir -p $REPO/logs \
+         $REPO/output/user_agent_test \
+         $REPO/output/daily_conv_test
+
+VLLM_HOST=$(cat $REPO/logs/vllm_host.txt 2>/dev/null || echo "localhost")
+# Read all vLLM ports (fallback to single port 8000 if ports file missing)
+VLLM_PORTS=($(python3 -c "
+import json, os
+f = '$REPO/logs/vllm_ports.json'
+print(' '.join(map(str, json.load(open(f))))) if os.path.exists(f) else print('8000')
+"))
+N_INSTANCES=${#VLLM_PORTS[@]}
+
+echo "=============================="
+echo "test_text  JobID: $SLURM_JOB_ID  Node: $SLURM_NODELIST"
+echo "vLLM: $VLLM_HOST  ports: ${VLLM_PORTS[*]}  ($N_INSTANCES instances)"
+echo "Topics: ${TEST_TOPICS[*]}  Scenarios: $NUM_SCENARIOS"
+echo "Start: $(date)"
+echo "=============================="
+
+# Wait for all vLLM instances (max 15 min each)
+for PORT in "${VLLM_PORTS[@]}"; do
+    echo "Waiting for vLLM port $PORT..."
+    for i in $(seq 1 90); do
+        curl -s --connect-timeout 3 "http://${VLLM_HOST}:${PORT}/health" > /dev/null 2>&1 && \
+            echo "  port $PORT ready (attempt $i)" && break
+        [ $i -eq 90 ] && echo "ERROR: vLLM port $PORT not ready after 15 min" && exit 1
+        sleep 10
+    done
+done
+
+run_topic() {
+    local IDX="$1" TYPE="$2" TOPIC="$3"
+    local PORTS_ARR=($VLLM_PORTS_STR)
+    local PORT="${PORTS_ARR[$((IDX % N_INSTANCES))]}"
+    local SCRIPT OUTPUT CONFIG
+    if [ "$TYPE" = "ua" ]; then
+        SCRIPT="generate/gen_user_agent.py"
+        OUTPUT="$REPO/output/user_agent_test"
+        CONFIG="$REPO/conf/user_agent.yaml"
+    else
+        SCRIPT="generate/gen_daily_conv.py"
+        OUTPUT="$REPO/output/daily_conv_test"
+        CONFIG="$REPO/conf/daily_conv.yaml"
+    fi
+    echo "[$(date +%H:%M:%S)] START ${TYPE}/${TOPIC} → port $PORT"
+    $PYTHON $REPO/${SCRIPT} \
+        --config  "$CONFIG" \
+        --topic   "$TOPIC" \
+        --num-scenarios "$NUM_SCENARIOS" \
+        --output  "$OUTPUT" \
+        --vllm-url "http://${VLLM_HOST}:${PORT}/v1" \
+        >> "$REPO/logs/test_text_${TYPE}_${TOPIC}.log" 2>&1
+    echo "[$(date +%H:%M:%S)] DONE  ${TYPE}/${TOPIC} (exit $?)"
+}
+export -f run_topic
+export PYTHON VLLM_HOST REPO NUM_SCENARIOS
+export VLLM_PORTS_STR="${VLLM_PORTS[*]}"   # space-separated string for subshell
+export N_INSTANCES
+
+ARGS=()
+IDX=0
+for TOPIC in "${TEST_TOPICS[@]}"; do
+    ARGS+=("$IDX|ua|${TOPIC}"); IDX=$((IDX+1))
+    ARGS+=("$IDX|dc|${TOPIC}"); IDX=$((IDX+1))
+done
+
+printf '%s\n' "${ARGS[@]}" | xargs -P 6 -I{} bash -c '
+    IFS="|" read -r IDX TYPE TOPIC <<< "$1"
+    run_topic "$IDX" "$TYPE" "$TOPIC"
+' _ {}
+
+echo "=============================="
+echo "test_text done. End: $(date)"
+echo "=============================="

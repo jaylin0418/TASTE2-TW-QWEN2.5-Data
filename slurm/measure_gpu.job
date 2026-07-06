@@ -1,0 +1,113 @@
+#!/bin/bash
+#SBATCH -J measure_gpu
+#SBATCH -A mst113025
+#SBATCH -p 8gpus
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=320G
+#SBATCH --time=00:30:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/measure_gpu_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/measure_gpu_%j.err
+
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
+REF_POOL=$REPO/ref_audio/pool/ref_pool.json
+BREEZY_REPO=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice
+BREEZY_PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+BREEZY_MODEL=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
+
+export PYTHONPATH=$INDEXTTS_DIR:$REPO:$PYTHONPATH
+
+MEASURE_LOG=$REPO/logs/gpu_measure_${SLURM_JOB_ID}.csv
+echo "timestamp,gpu_id,memory_used_MiB,memory_total_MiB,utilization_pct" > $MEASURE_LOG
+
+# Background GPU sampler (every 5s, no watch command)
+(
+    while true; do
+        nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu \
+            --format=csv,noheader,nounits \
+            | awk -v ts="$(date +%H:%M:%S)" '{print ts","$0}' >> $MEASURE_LOG
+        sleep 5
+    done
+) &
+SAMPLER_PID=$!
+
+echo "=== Baseline (no model) ==="
+nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
+
+echo ""
+echo "=== Test 1: 1 IndexTTS worker on GPU 0 ==="
+CUDA_VISIBLE_DEVICES=0 $PYTHON $REPO/tts/tts_runner.py \
+    --input  $REPO/output/user_agent_test/烹飪/dialogues.jsonl \
+    --output $REPO/tts_output/gpu_measure_test/indextts_1w \
+    --config $REPO/conf/base.yaml \
+    --indextts-dir $INDEXTTS_DIR \
+    --ref-pool $REF_POOL \
+    --breezy-repo $BREEZY_REPO --breezy-python $BREEZY_PYTHON --breezy-model $BREEZY_MODEL \
+    --worker-id 0 --num-workers 1 &
+W1=$!
+
+sleep 30
+echo "--- GPU usage during 1 IndexTTS worker ---"
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
+wait $W1
+
+echo ""
+echo "=== Test 2: 2 IndexTTS workers on GPU 0 simultaneously ==="
+rm -rf $REPO/tts_output/gpu_measure_test
+for w in 0 1; do
+    CUDA_VISIBLE_DEVICES=0 $PYTHON $REPO/tts/tts_runner.py \
+        --input  $REPO/output/user_agent_test/科技/dialogues.jsonl \
+        --output $REPO/tts_output/gpu_measure_test/indextts_2w_w${w} \
+        --config $REPO/conf/base.yaml \
+        --indextts-dir $INDEXTTS_DIR \
+        --ref-pool $REF_POOL \
+        --breezy-repo $BREEZY_REPO --breezy-python $BREEZY_PYTHON --breezy-model $BREEZY_MODEL \
+        --worker-id 0 --num-workers 1 &
+done
+sleep 45
+echo "--- GPU usage during 2 IndexTTS workers on same GPU ---"
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
+wait
+
+echo ""
+echo "=== Test 3: 4 IndexTTS workers on GPU 0 simultaneously ==="
+rm -rf $REPO/tts_output/gpu_measure_test
+for w in 0 1 2 3; do
+    CUDA_VISIBLE_DEVICES=0 $PYTHON $REPO/tts/tts_runner.py \
+        --input  $REPO/output/user_agent_test/台灣文化/dialogues.jsonl \
+        --output $REPO/tts_output/gpu_measure_test/indextts_4w_w${w} \
+        --config $REPO/conf/base.yaml \
+        --indextts-dir $INDEXTTS_DIR \
+        --ref-pool $REF_POOL \
+        --breezy-repo $BREEZY_REPO --breezy-python $BREEZY_PYTHON --breezy-model $BREEZY_MODEL \
+        --worker-id 0 --num-workers 1 &
+done
+sleep 60
+echo "--- GPU usage during 4 IndexTTS workers on same GPU ---"
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
+wait
+
+kill $SAMPLER_PID 2>/dev/null
+
+echo ""
+echo "=== Summary ==="
+echo "Full GPU samples saved to: $MEASURE_LOG"
+echo "Use this to determine safe N_PARALLEL_PER_GPU"
+python3 -c "
+import csv
+rows = list(csv.reader(open('$MEASURE_LOG')))
+print(f'Total samples: {len(rows)-1}')
+if len(rows) > 1:
+    # Peak memory per GPU
+    from collections import defaultdict
+    peak = defaultdict(int)
+    for r in rows[1:]:
+        try: peak[r[1].strip()] = max(peak[r[1].strip()], int(r[2].strip()))
+        except: pass
+    for g, m in sorted(peak.items()):
+        print(f'  GPU {g}: peak {m} MiB used')
+"

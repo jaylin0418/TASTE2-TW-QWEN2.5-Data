@@ -1,0 +1,79 @@
+#!/bin/bash
+#SBATCH -J test_if_gen
+#SBATCH -A mst113234
+#SBATCH -p dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --time=01:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/test_if_gen_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/test_if_gen_%j.err
+
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
+CONFIG=$REPO/conf/if_data.yaml
+OUTPUT=$REPO/output/if_data_test
+N_DIALOGUES=30
+
+mkdir -p $REPO/logs $OUTPUT
+
+# Pick one live vLLM endpoint
+ENDPOINT=$(python3 -c "
+import json, glob
+files = glob.glob('$REPO/logs/vllm_node_*.json')
+for f in sorted(files):
+    try:
+        d = json.load(open(f))
+        print(f'{d[\"host\"]}:{d[\"ports\"][0]}')
+        break
+    except: pass
+")
+[ -z "$ENDPOINT" ] && echo "ERROR: no vLLM endpoint" && exit 1
+
+echo "=================================="
+echo "test_if_gen  N=$N_DIALOGUES  endpoint=$ENDPOINT"
+echo "Start: $(date)"
+echo "=================================="
+
+START_TS=$(date +%s)
+
+$PYTHON $REPO/generate/gen_if_data.py \
+    --config  "$CONFIG" \
+    --num-dialogues $N_DIALOGUES \
+    --output  "$OUTPUT" \
+    --vllm-url "http://${ENDPOINT}/v1" \
+    --worker-id 0 \
+    --num-workers 1
+
+END_TS=$(date +%s)
+ELAPSED=$(( END_TS - START_TS ))
+
+echo ""
+echo "=================================="
+echo "Done: $(date)  elapsed=${ELAPSED}s"
+echo "Avg per dialogue: $(python3 -c "print(f'{$ELAPSED/$N_DIALOGUES:.1f}s')")"
+
+# Show sample dialogue structure
+echo ""
+echo "--- sample dialogue ---"
+python3 -c "
+import json
+from pathlib import Path
+lines = (Path('$OUTPUT') / 'dialogues_w00.jsonl').read_text(encoding='utf-8').strip().splitlines()
+d = json.loads(lines[0])
+print('id:', d.get('id'))
+print('num_tasks:', len(d.get('tasks', d.get('turns', []))))
+turns = d.get('turns', [])
+print('num_turns:', len(turns))
+total_chars = sum(len(t.get('text','')) for t in turns)
+print('total_chars:', total_chars)
+# Estimate audio duration (rough: 3.5 chars/sec Mandarin)
+est_sec = total_chars / 3.5
+print(f'est_duration: ~{est_sec:.0f}s = ~{est_sec/60:.1f}min')
+print()
+for i, t in enumerate(turns[:4]):
+    print(f'  turn {i} [{t.get(\"role\")}]: {t.get(\"text\",\"\")[:60]}')
+"
+echo "=================================="

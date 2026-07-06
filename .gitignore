@@ -10,3 +10,10 @@ __pycache__/
 *.err
 *.log
 slurm-*.out
+
+# Large data / model artifacts
+tts_output/
+parquet/
+checkpoints/
+ref_audio/pool/
+ref_audio/filtered_voice*.zip

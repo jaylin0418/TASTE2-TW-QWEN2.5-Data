@@ -1,0 +1,70 @@
+#!/bin/bash
+#SBATCH -J tts_dc_rem
+#SBATCH -A mst113234
+#SBATCH -p 64gpus
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=480G
+#SBATCH --time=08:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/tts_dc_rem_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/tts_dc_rem_%j.err
+
+# Mode A: flat remaining_daily_conv.jsonl → tts_output/daily_conv_remaining/
+# N_PARALLEL_PER_GPU=8 (64 workers/node, 7.5GB/worker RAM)
+
+export REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+export PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+export INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
+export REF_POOL=$REPO/ref_audio/pool/ref_pool.json
+export BREEZY_REPO=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice
+export BREEZY_PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+export BREEZY_MODEL=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
+export OUTPUT_DIR=$REPO/tts_output/daily_conv_remaining
+export LOG_DIR=$REPO/logs
+export INPUT_FILE=$REPO/output/daily_conv/remaining_daily_conv.jsonl
+
+export N_GPU_PER_NODE=8
+export N_PARALLEL_PER_GPU=8
+export N_NODES=$SLURM_NNODES
+export N_WORKERS_PER_NODE=$((N_GPU_PER_NODE * N_PARALLEL_PER_GPU))   # 64
+export N_TOTAL_WORKERS=$((N_NODES * N_WORKERS_PER_NODE))              # 256
+
+export TORCH_EXTENSIONS_DIR=/work/jaylin0418/torch_extensions
+export TMPDIR=/work/jaylin0418/tmp_$SLURM_JOB_ID
+mkdir -p $LOG_DIR $OUTPUT_DIR $TORCH_EXTENSIONS_DIR $TMPDIR
+export PYTHONPATH=$INDEXTTS_DIR:$REPO:$PYTHONPATH
+chmod +x $REPO/slurm/tts_dc_remaining_node_worker.sh
+
+echo "Pre-compiling IndexTTS CUDA extension..."
+CUDA_VISIBLE_DEVICES=0 $PYTHON -c "
+import sys, os
+sys.path.insert(0, '$INDEXTTS_DIR')
+os.environ['TORCH_EXTENSIONS_DIR'] = '$TORCH_EXTENSIONS_DIR'
+os.environ['TMPDIR'] = '$TMPDIR'
+from indextts.infer import IndexTTS
+print('IndexTTS import OK')
+" && echo "Pre-compile done." || echo "Pre-compile warning (workers will retry)"
+
+TOTAL_DLG=$(wc -l < $INPUT_FILE)
+echo "============================================================"
+echo "Job: tts_dc_remaining  JobID: $SLURM_JOB_ID  Nodes: $SLURM_NODELIST"
+echo "Nodes: $N_NODES  Workers/node: $N_WORKERS_PER_NODE  Total: $N_TOTAL_WORKERS"
+echo "Input: $INPUT_FILE  ($TOTAL_DLG dialogues)"
+echo "Start: $(date)"
+echo "============================================================"
+
+srun --ntasks=$N_NODES --ntasks-per-node=1 \
+    bash $REPO/slurm/tts_dc_remaining_node_worker.sh
+
+echo "============================================================"
+echo "tts_dc_remaining done. End: $(date)"
+python3 -c "
+import json
+from pathlib import Path
+metas = list(Path('$OUTPUT_DIR').rglob('meta.json'))
+total_sec = sum(json.loads(m.read_text()).get('total_duration_sec',0) for m in metas)
+print(f'Completed: {len(metas)} dialogues = {total_sec/3600:.1f}h')
+" 2>/dev/null
+echo "============================================================"

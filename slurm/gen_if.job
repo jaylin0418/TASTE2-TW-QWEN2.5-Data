@@ -1,0 +1,97 @@
+#!/bin/bash
+#SBATCH -J gen_if
+#SBATCH -A mst113025
+#SBATCH -p dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32G
+#SBATCH --time=04:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_if_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_if_%j.err
+
+# Type 3 IF data text generation.
+# 8 workers × 625 = 5000 dialogues total → est. ~111h gross TTS audio (at ~80s/dlg avg).
+# Each worker writes to output/if_data/dialogues_w{id:02d}.jsonl.
+# Resume-safe: gen_if_data.py skips already-written dialogue IDs.
+
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
+CONFIG=$REPO/conf/if_data.yaml
+OUTPUT=$REPO/output/if_data
+N_WORKERS=8
+TOTAL_DIALOGUES=5000   # per worker = TOTAL_DIALOGUES / N_WORKERS
+
+mkdir -p $REPO/logs $OUTPUT
+
+# Discover vLLM endpoints
+ENDPOINTS_STR=""
+for attempt in $(seq 1 60); do
+    ENDPOINTS_STR=$(python3 -c "
+import json, glob
+files = glob.glob('$REPO/logs/vllm_node_*.json')
+pairs = []
+for f in files:
+    try:
+        d = json.load(open(f))
+        for p in d['ports']:
+            pairs.append(f'{d[\"host\"]}:{p}')
+    except: pass
+print(' '.join(pairs))
+")
+    [ -n "$ENDPOINTS_STR" ] && break
+    echo "Waiting for vLLM endpoint files... (attempt $attempt)"
+    sleep 10
+done
+[ -z "$ENDPOINTS_STR" ] && echo "ERROR: no vLLM endpoints found" && exit 1
+
+ENDPOINTS=($ENDPOINTS_STR)
+N_INSTANCES=${#ENDPOINTS[@]}
+
+echo "============================================================"
+echo "Job: gen_if  JobID: $SLURM_JOB_ID"
+echo "vLLM endpoints ($N_INSTANCES): ${ENDPOINTS[*]}"
+echo "Workers: $N_WORKERS  Total dialogues: $TOTAL_DIALOGUES"
+echo "Start: $(date)"
+echo "============================================================"
+
+for ENDPOINT in "${ENDPOINTS[@]}"; do
+    for i in $(seq 1 90); do
+        curl -s --connect-timeout 3 "http://${ENDPOINT}/health" > /dev/null 2>&1 && \
+            echo "  $ENDPOINT ready" && break
+        [ $i -eq 90 ] && echo "WARN: $ENDPOINT not ready, continuing anyway"
+        sleep 10
+    done
+done
+
+run_worker() {
+    local WID="$1"
+    local EP_ARR=($ENDPOINTS_STR)
+    local EP="${EP_ARR[$(( WID % N_INSTANCES ))]}"
+    echo "[$(date +%H:%M:%S)] START worker $WID → $EP"
+    $PYTHON $REPO/generate/gen_if_data.py \
+        --config        "$CONFIG" \
+        --num-dialogues "$TOTAL_DIALOGUES" \
+        --output        "$OUTPUT" \
+        --worker-id     "$WID" \
+        --num-workers   "$N_WORKERS" \
+        --vllm-url      "http://${EP}/v1" \
+        >> "$REPO/logs/gen_if_w${WID}.log" 2>&1
+    echo "[$(date +%H:%M:%S)] DONE  worker $WID"
+}
+export -f run_worker
+export PYTHON CONFIG OUTPUT REPO N_WORKERS TOTAL_DIALOGUES N_INSTANCES ENDPOINTS_STR
+
+seq 0 $((N_WORKERS - 1)) \
+    | xargs -P $N_WORKERS -I{} bash -c 'run_worker "$1"' _ {}
+
+echo "============================================================"
+echo "gen_if done. End: $(date)"
+# Show per-worker counts
+for WID in $(seq 0 $((N_WORKERS - 1))); do
+    F=$OUTPUT/dialogues_w$(printf "%02d" $WID).jsonl
+    COUNT=$(wc -l < $F 2>/dev/null || echo 0)
+    echo "  worker $WID: $COUNT dialogues"
+done
+echo "============================================================"

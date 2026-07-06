@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J tts_synth
-#SBATCH -A mst115022
+#SBATCH -A mst113025
 #SBATCH -p 8gpus
 #SBATCH --array=0-44
 #SBATCH --nodes=1
@@ -17,8 +17,7 @@ REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
 # breezyvoice_py310 has torch+torchaudio+soundfile+librosa (runs IndexTTS-2 too)
 PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
 INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
-CV_POOL=/work/jaylin0418/common_voice_zh_TW/pool/cv_pool.json
-REF_AUDIO_DIR=/home/jaylin0418/SpeechLab/ref_audio/eleven_lab_emotion
+REF_POOL=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data/ref_audio/pool/ref_pool.json
 BREEZY_REPO=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice
 BREEZY_PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
 BREEZY_MODEL=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
@@ -34,7 +33,7 @@ TOPICS=(
     "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
     "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
     "傳統文化" "旅遊" "天氣" "工作職場"
-    "台灣文化" "台灣旅遊" "台灣社會" "民俗信仰"
+    "台灣文化" "台灣旅遊" "台灣社會" "台灣民俗信仰"
 )
 
 TOPIC="${TOPICS[$SLURM_ARRAY_TASK_ID]}"
@@ -57,8 +56,7 @@ $PYTHON $REPO/tts/tts_runner.py \
     --output        "$OUTPUT" \
     --config        $REPO/conf/base.yaml \
     --indextts-dir  $INDEXTTS_DIR \
-    --cv-pool       $CV_POOL \
-    --ref-audio-dir $REF_AUDIO_DIR \
+    --ref-pool      $REF_POOL \
     --breezy-repo   $BREEZY_REPO \
     --breezy-python $BREEZY_PYTHON \
     --breezy-model  $BREEZY_MODEL \

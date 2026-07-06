@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH -J gen_text
-#SBATCH -A mst115022
-#SBATCH -p ngs62g
-#SBATCH --array=0-44        # 0-46 = 47 topics
+#SBATCH -A mst113025
+#SBATCH -p dev
+#SBATCH --gpus-per-node=1
+#SBATCH --array=0-44%8      # max 8 concurrent (p_dev QOS limit)
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
@@ -17,10 +18,13 @@ PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
 VLLM_PORT=8000
 # Read vLLM server hostname written by launch_vllm.job
 VLLM_HOST=$(cat $REPO/logs/vllm_host.txt 2>/dev/null || echo "localhost")
-DATA_TYPE=user_agent   # user_agent | user_agent_v2 | daily_conv | daily_conv_v2
+DATA_TYPE=user_agent   # user_agent | daily_conv
 CONFIG=$REPO/conf/${DATA_TYPE}.yaml
 OUTPUT=$REPO/output/${DATA_TYPE}
-NUM_SCENARIOS=200
+# 一般 topic: 245 篇；台灣相關 topic (後4個): 490 篇 (2x 權重)
+# 共 41×245 + 4×490 = 12,005 篇 ≈ 500 小時 TTS
+NUM_SCENARIOS_GENERAL=245
+NUM_SCENARIOS_TW=490
 # ─────────────────────────────────────────────────────────────────────────────
 
 mkdir -p $REPO/logs $OUTPUT
@@ -32,13 +36,21 @@ TOPICS=(
     "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
     "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
     "傳統文化" "旅遊" "天氣" "工作職場"
-    "台灣文化" "台灣旅遊" "台灣社會" "民俗信仰"
+    "台灣文化" "台灣旅遊" "台灣社會" "台灣民俗信仰"
 )
 
 TOPIC="${TOPICS[$SLURM_ARRAY_TASK_ID]}"
+
+# 台灣相關 topic 用 2x scenarios (array index 41-44)
+if [ "$SLURM_ARRAY_TASK_ID" -ge 41 ]; then
+    NUM_SCENARIOS=$NUM_SCENARIOS_TW
+else
+    NUM_SCENARIOS=$NUM_SCENARIOS_GENERAL
+fi
+
 echo "=========================================="
 echo "Job: gen_text  Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID"
-echo "Topic: $TOPIC  DataType: $DATA_TYPE  vLLM: $VLLM_HOST:$VLLM_PORT"
+echo "Topic: $TOPIC  Scenarios: $NUM_SCENARIOS  DataType: $DATA_TYPE  vLLM: $VLLM_HOST:$VLLM_PORT"
 echo "Start: $(date)"
 echo "=========================================="
 

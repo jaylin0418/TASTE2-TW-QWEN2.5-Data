@@ -9,7 +9,7 @@ dialogues_per_scenario: 1
 
 # FSM 機率參數
 fsm:
-  p_leave_first: 0.75    # 從未切換過時，Normal → Fast/Slow 的機率
+  p_leave_first: 0.60    # 從未切換過時，Normal → Fast/Slow 的機率
   p_leave_again: 0.40    # 回到 Normal 後，再次離開的機率
   p_return: 0.40         # Fast/Slow → Normal 的機率
   # Fast 和 Slow 各佔 50%（平均分配）

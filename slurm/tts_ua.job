@@ -1,0 +1,62 @@
+#!/bin/bash
+#SBATCH -J tts_ua
+#SBATCH -A mst113025
+#SBATCH -p 64gpus
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=480G
+#SBATCH --time=16:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/tts_ua_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/tts_ua_%j.err
+
+# ── USER CONFIGURATION ────────────────────────────────────────────────────────
+export REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+export PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+export INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
+export REF_POOL=$REPO/ref_audio/pool/ref_pool.json
+export BREEZY_REPO=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice
+export BREEZY_PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+export BREEZY_MODEL=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
+export INPUT_BASE=$REPO/output/user_agent
+export OUTPUT_BASE=$REPO/tts_output/user_agent
+export MAX_WAIT_SECS=86400
+export LOG_DIR=$REPO/logs
+export LOG_PREFIX=tts_ua
+# ─────────────────────────────────────────────────────────────────────────────
+
+export N_GPU_PER_NODE=8
+export N_PARALLEL_PER_GPU=16
+export N_NODES=$SLURM_NNODES
+export N_WORKERS_PER_NODE=$((N_GPU_PER_NODE * N_PARALLEL_PER_GPU))   # 128
+export N_TOTAL_WORKERS=$((N_NODES * N_WORKERS_PER_NODE))              # 512
+
+mkdir -p $LOG_DIR $OUTPUT_BASE
+export PYTHONPATH=$INDEXTTS_DIR:$REPO:$PYTHONPATH
+chmod +x $REPO/slurm/tts_node_worker.sh
+
+TOPICS=(
+    "藝術" "書籍" "汽車" "名人" "程式設計" "烹飪" "教育" "活動與展覽"
+    "時尚" "健身" "財經" "美食" "電玩遊戲" "園藝" "健康" "歷史"
+    "嗜好" "假期旅遊" "居家生活" "語言學習" "彩妝" "電影" "音樂"
+    "大自然" "新聞時事" "寵物" "哲學" "攝影" "播客節目" "政治"
+    "人際關係" "科學" "購物" "社群媒體" "心靈成長" "運動" "科技"
+    "傳統文化" "旅遊" "天氣" "工作職場"
+    "台灣文化" "台灣旅遊" "台灣社會" "台灣民俗信仰"
+)
+export TOPICS_STR="${TOPICS[*]}"
+
+echo "============================================================"
+echo "Job: tts_ua  JobID: $SLURM_JOB_ID  Nodes: $SLURM_NODELIST"
+echo "Nodes: $N_NODES  Workers/node: $N_WORKERS_PER_NODE  Total workers: $N_TOTAL_WORKERS"
+echo "Topics: ${#TOPICS[@]}"
+echo "Start: $(date)"
+echo "============================================================"
+
+srun --ntasks=$N_NODES --ntasks-per-node=1 \
+    bash $REPO/slurm/tts_node_worker.sh
+
+echo "============================================================"
+echo "tts_ua done. End: $(date)"
+echo "============================================================"

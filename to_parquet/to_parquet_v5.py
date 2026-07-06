@@ -94,11 +94,21 @@ def record_to_row(record: dict, tts_base: Path) -> dict | None:
     if not messages:
         return None
 
+    system_prompt = record.get("system_prompt", "")
+    if system_prompt:
+        messages.insert(0, {
+            "role":            "system",
+            "text":            system_prompt,
+            "audio":           None,
+            "timestamp_range": [],
+            "speed":           "normal",
+        })
+
     return {
         "idx":           record.get("id", ""),
         "type":          record.get("type", ""),
         "topic":         record.get("topic", ""),
-        "system_prompt": record.get("system_prompt", ""),
+        "system_prompt": system_prompt,
         "meta": {
             "data_type":      record.get("type", ""),
             "tts_backend":    record.get("tts_backend", ""),
@@ -115,7 +125,7 @@ def rows_to_table(rows: list[dict]) -> pa.Table:
 
 def estimate_size_gb(rows: list[dict]) -> float:
     total = sum(
-        sum(len(m["audio"]) for m in r["message"]) for r in rows
+        sum(len(m["audio"]) for m in r["message"] if m.get("audio")) for r in rows
     )
     return total / 1e9
 
@@ -125,17 +135,22 @@ def convert(input_dir: str, output_dir: str, prefix: str, chunk_gb: float):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Collect all tts_output JSONL files
-    jsonl_files = sorted(input_path.rglob("tts_output_w*.jsonl"))
-    if not jsonl_files:
-        # Also accept meta.json per-dialogue
+    # Mode A (IF): tts_output_w*.jsonl files sit directly in input_path
+    #              → wav paths are relative to input_path.parent
+    # Mode B (UA/DC): workers also emit per-topic jsonl but meta.json is authoritative
+    #              → wav paths are relative to input_path itself
+    flat_jsonl = sorted(input_path.glob("tts_output_w*.jsonl"))
+    if flat_jsonl:
+        jsonl_files = flat_jsonl
+        tts_base = input_path.parent
+    else:
         jsonl_files = sorted(input_path.rglob("meta.json"))
+        tts_base = input_path
 
-    logger.info(f"Found {len(jsonl_files)} JSONL files")
+    logger.info(f"Found {len(jsonl_files)} files (mode={'A/jsonl' if flat_jsonl else 'B/meta'}, tts_base={tts_base})")
 
     rows_buffer: list[dict] = []
     part_idx = 0
-    tts_base = input_path.parent
 
     def flush(rows: list[dict], idx: int):
         if not rows:
