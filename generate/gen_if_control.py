@@ -171,6 +171,7 @@ def main():
                 "id": dialogue_id,
                 "type": "type4_if_control",
                 "tts_backend": backend,
+                "system_prompt": "兩人正在進行語言互動練習，一方發出指令並指定語速，另一方以對應語速精準執行各種任務。",
                 "if_tasks": task_list,
                 "speed_sequence": speed_list,
                 "turns": turns,
