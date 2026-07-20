@@ -6,7 +6,7 @@
 vllm:
   base_url: "http://localhost:8000/v1"
   api_key: "token"
-  model: "Qwen/Qwen2.5-32B-Instruct"
+  model: "/work/jaylin0418/models/Qwen2.5-32B-Instruct"
   timeout: 120
   max_retries: 5
   retry_delay: 2.0

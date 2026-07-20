@@ -278,7 +278,7 @@ def process_topic(client: VLLMClient, cfg: dict, topic: str,
                 except Exception:
                     pass
 
-    scenarios = gen_scenarios(client, cfg, topic, num_scenarios, existing_ids=existing)
+    scenarios = gen_scenarios(client, cfg, topic, num_scenarios)
     if not scenarios:
         logger.warning(f"No scenarios for topic: {topic}")
         return 0
@@ -306,6 +306,7 @@ def process_topic(client: VLLMClient, cfg: dict, topic: str,
             record = {
                 "id": dialogue_id,
                 "type": "type5_speed_ua",
+                "tts_backend": "indextts" if written % 2 == 0 else "breezyvoice",
                 "topic": topic,
                 "scenario": sc["description"],
                 "system_prompt": sys_prompt,

@@ -510,7 +510,7 @@ def _process_topic(topic_input: Path, topic_output: Path, cfg: dict,
 
     # Lazy-load IndexTTS on first encounter
     if tts_model_ref[0] is None:
-        if any(r.get("tts_backend") == "indextts" for r in my_records):
+        if any(r.get("tts_backend", "indextts") == "indextts" for r in my_records):
             logger.info("Loading IndexTTS-2 (first indextts dialogue)...")
             tts_model_ref[0] = load_indextts(indextts_dir)
             logger.info("IndexTTS-2 ready.")
