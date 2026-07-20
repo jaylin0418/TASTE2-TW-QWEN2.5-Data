@@ -197,29 +197,107 @@ vllm_server/launch_vllm_local.sh        登入節點 vLLM 啟動（H100）
 vllm_server/launch_vllm.job             SLURM vLLM job
 ```
 
-## 快速開始
+## Type 4 / Type 5 大量生產流程
+
+> **前置條件**：vLLM server 必須先啟動（登入節點 H100 或 SLURM GPU job）。
+
+### Step 0 — 啟動 vLLM
 
 ```bash
-# 1. 啟動 vLLM server（登入節點 H100）
+# 方法 A：登入節點 H100（不佔 SU，但會搶佔 GPU）
 bash vllm_server/launch_vllm_local.sh
+# 等到 log 出現 "Application startup complete" 才能跑下一步
 
-# 2. 品質預覽（確認生成品質後再大量生產）
-conda run -n vllm_py312 python3 test_if_control.py   # Type 4
-conda run -n vllm_py312 python3 test_speed_ua.py     # Type 5
+# 方法 B：送 SLURM job（需 GPU SU）
+sbatch vllm_server/launch_vllm.job
+# 等 job 開始後從 logs/vllm_host.txt 取得 host
+```
 
-# 3. 大規模文字生成（SLURM）
-sbatch slurm/gen_if_control.job    # Type 4，array 0-7
-sbatch slurm/gen_speed_ua.job      # Type 5，array 0-44 topics
+### Step 1 — 品質預覽（小規模，先確認品質再大量跑）
 
-# 4. TTS 合成（SLURM，需 GPU）
+```bash
+# Type 4
+conda run -n vllm_py312 python3 test_if_control.py
+# 輸出在 preview_output/type4_if_control.txt
+
+# Type 5
+conda run -n vllm_py312 python3 test_speed_ua.py
+# 輸出在 preview_output/type5_speed_ua.txt
+```
+
+確認文本品質符合預期後再進行下一步。
+
+### Step 2 — 大規模文字生成（SLURM CPU job，不需 GPU）
+
+```bash
+# Type 4：8 workers 並行，每 worker 2000 筆，共 16000 筆
+# 輸出：output/if_control/dialogues_w00.jsonl … dialogues_w07.jsonl
+sbatch slurm/gen_if_control.job
+
+# Type 5：45 topics 並行，每 topic 200 段對話，共 ~9000 筆
+# 輸出：output/speed_ua/dialogues_{topic}.jsonl
+sbatch slurm/gen_speed_ua.job
+
+# 等所有 array task 完成（約 2–4 小時）
+squeue -u $USER
+```
+
+> `gen_if_control.job` 和 `gen_speed_ua.job` 都需要 vLLM 在線。
+> vLLM host 從 `logs/vllm_host.txt` 自動讀取（login node 時為 localhost）。
+
+### Step 3 — TTS 合成（SLURM GPU job，需 H100）
+
+```bash
+# Type 4：array 0-7，每個 worker 處理一個 shard，共 8 個 GPU
+# 輸出：tts_output/if_control/worker_00/ … worker_07/
 sbatch slurm/tts_if_control_array.job
+
+# Type 5：array 0-44，每個 topic 一個 GPU
+# 輸出：tts_output/speed_ua/{topic}/
 sbatch slurm/tts_speed_ua_array.job
 
-# 5. 轉 Parquet
-sbatch slurm/to_parquet_if_control.job
-sbatch slurm/to_parquet_speed_ua.job
+# 等所有 array task 完成（每個 task 約 2–6 小時）
+squeue -u $USER
 ```
+
+TTS 會對 fast/slow Agent turns 自動做 time-stretch（`tts/speed_stretch.py`），
+parquet 裡存的是 stretch 後的音訊。
+
+### Step 4 — 過濾 + 轉 Parquet
+
+```bash
+# Type 4
+sbatch slurm/to_parquet_if_control.job
+# 輸出：parquet/if_control/*.parquet
+
+# Type 5
+sbatch slurm/to_parquet_speed_ua.job
+# 輸出：parquet/speed_ua/*.parquet
+```
+
+to_parquet job 會先執行 `filter_english_dialogues.py` 刪除含外文的對話，
+再打包成 Parquet（每 1GB 一個 part）。
+
+### 完整 Parquet Schema
+
+```
+message[0]: {role: "system", text: <system_prompt>, audio: null, speed: "normal"}
+message[1]: {role: "User",   text: ..., audio: <bytes>, timestamp_range: [ms,ms], speed: "normal"}
+message[2]: {role: "Agent",  text: ..., audio: <bytes>, timestamp_range: [ms,ms], speed: "fast"|"slow"|"normal"}
+...
+```
+
+- User turns 的 `speed` 永遠是 `"normal"`（User 說話速度不變）
+- Agent turns 的 `speed` 對應 stretch 後的音訊
+
+---
+
+## 樣本
+
+`samples/` 目錄下有 Type 4 / Type 5 各 2 個對話的完整音訊（WAV）和對話內容（meta.json）供聆聽確認。
+
+---
 
 ## 詳細規劃
 
-見 [PLANNING.md](PLANNING.md)。
+見 [PLANNING.md](PLANNING.md).

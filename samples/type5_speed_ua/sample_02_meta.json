@@ -1,0 +1,76 @@
+{
+  "id": "speed_ua_健康_s0003",
+  "type": "type5_speed_ua",
+  "tts_backend": "breezyvoice",
+  "topic": "健康",
+  "scenario": "一位七十歲的爺爺早晨在家裡覺得膝蓋疼痛想知道有什麼運動可以減輕症狀並且預防未來的關節炎",
+  "system_prompt": "你是一個人工智慧助理，專精於老年人健康與運動建議，現在要為七十歲的爺爺推薦適合的運動，以緩解膝蓋疼痛並預防關節炎。",
+  "turns": [
+    {
+      "role": "User",
+      "text": "爺爺膝蓋痛耶，有啥運動可以紓緩一下跟預防關節炎啦，慢慢講囉。",
+      "timestamp_start": 0.0,
+      "timestamp_end": 8.104
+    },
+    {
+      "role": "Agent",
+      "text": "游泳跟騎腳踏車都好，這些低衝擊運動對膝蓋比較友善。",
+      "speed": "slow",
+      "timestamp_start": 8.354,
+      "timestamp_end": 17.48
+    },
+    {
+      "role": "User",
+      "text": "游泳和騎腳踏車啊，這是真的假的，聽起來好像滿好的，但該注意些啥呢？",
+      "timestamp_start": 17.73,
+      "timestamp_end": 26.507
+    },
+    {
+      "role": "Agent",
+      "text": "做這些運動時要穿舒適衣服，熱身動作要做足，水溫和室溫也要適中。",
+      "speed": "slow",
+      "timestamp_start": 26.757,
+      "timestamp_end": 37.581
+    },
+    {
+      "role": "User",
+      "text": "嗚，那熱身大概要做多久啊，還有游泳池的水溫有啥特別要求嗎？",
+      "timestamp_start": 37.831,
+      "timestamp_end": 47.049
+    },
+    {
+      "role": "Agent",
+      "text": "熱身十到十五分鐘就好，水溫最好保持在廿八度左右，這樣對身體比較友善。",
+      "speed": "slow",
+      "timestamp_start": 47.299,
+      "timestamp_end": 60.394
+    },
+    {
+      "role": "User",
+      "text": "哦好，那每天要做幾次這種運動，一次要做好久啊，有點好奇。",
+      "timestamp_start": 60.644,
+      "timestamp_end": 68.248
+    },
+    {
+      "role": "Agent",
+      "text": "每天至少一次，每次半小時到一小時，量力而為，別太過就好了。",
+      "speed": "slow",
+      "timestamp_start": 68.498,
+      "timestamp_end": 80.45
+    },
+    {
+      "role": "User",
+      "text": "每天做半小時到一小時啊，這樣子是長期做還是間隔幾天做一次比較好呢？",
+      "timestamp_start": 80.7,
+      "timestamp_end": 90.359
+    },
+    {
+      "role": "Agent",
+      "text": "最好是每天都做，維持規律，不過也要視當天狀況調整休息。",
+      "speed": "slow",
+      "timestamp_start": 90.609,
+      "timestamp_end": 98.592
+    }
+  ],
+  "total_duration_sec": 98.59
+}

@@ -1,0 +1,63 @@
+{
+  "id": "speed_ua_健康_s0001",
+  "type": "type5_speed_ua",
+  "tts_backend": "indextts",
+  "topic": "健康",
+  "scenario": "一位上班族中午在辦公室感到頭暈乏力想要找個適合的午餐選單來改善身體狀況",
+  "system_prompt": "你是一個人工智慧助理，專精於營養學與健康管理，現協助選擇有益健康的午餐選單以提升上班族的午間體力。",
+  "turns": [
+    {
+      "role": "User",
+      "text": "我現在超頭暈有力氣都沒有，欸你可以幫我想個好的便當選擇嗎，說慢一點哈。",
+      "timestamp_start": 0.0,
+      "timestamp_end": 7.663
+    },
+    {
+      "role": "Agent",
+      "text": "可以考慮雞胸肉色拉配全麥土司，再加上一小份地瓜，補充能量又健康。",
+      "speed": "slow",
+      "timestamp_start": 7.913,
+      "timestamp_end": 18.747
+    },
+    {
+      "role": "User",
+      "text": "聽起來不錯，但附近有賣這種便當嗎？",
+      "timestamp_start": 18.997,
+      "timestamp_end": 23.281
+    },
+    {
+      "role": "Agent",
+      "text": "看看附近超市或便利商店，通常都有售賣雞胸肉色拉和全麥土司，地瓜也可以買罐頭或即食型的。",
+      "speed": "slow",
+      "timestamp_start": 23.531,
+      "timestamp_end": 37.361
+    },
+    {
+      "role": "User",
+      "text": "好你用正常速度說就好，那這種食物對頭暈有效嗎？",
+      "timestamp_start": 37.611,
+      "timestamp_end": 43.439
+    },
+    {
+      "role": "Agent",
+      "text": "這些食物提供均衡營養，有助穩定血糖，改善頭暈乏力情況。",
+      "speed": "normal",
+      "timestamp_start": 43.689,
+      "timestamp_end": 49.18
+    },
+    {
+      "role": "User",
+      "text": "欸你剛剛講的那些食物真的會有幫助嗎，快點詳細說明一下好了。",
+      "timestamp_start": 49.43,
+      "timestamp_end": 55.27
+    },
+    {
+      "role": "Agent",
+      "text": "雞胸肉低脂高蛋白，色拉蔬菜補充維他命礦物質，全麥土司緩釋碳水化合物，地瓜則是優良纖維和能量來源，這些都能穩定血糖，增加體力。",
+      "speed": "fast",
+      "timestamp_start": 55.52,
+      "timestamp_end": 67.893
+    }
+  ],
+  "total_duration_sec": 67.89
+}

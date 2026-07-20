@@ -1,0 +1,76 @@
+{
+  "id": "if_control_000000",
+  "type": "type4_if_control",
+  "tts_backend": "indextts",
+  "if_tasks": [
+    "描述",
+    "列舉",
+    "朗讀",
+    "比較"
+  ],
+  "speed_sequence": [
+    "slow",
+    "slow",
+    "slow",
+    "slow"
+  ],
+  "turns": [
+    {
+      "role": "User",
+      "text": "用慢的速度描述一個雨後清晨的公園。",
+      "speed": "",
+      "timestamp_start": 0.0,
+      "timestamp_end": 4.865
+    },
+    {
+      "role": "Agent",
+      "text": "雨後的公園空氣清新，樹葉上的水珠在陽光下閃爍，鳥兒鳴叫聲格外清脆。",
+      "speed": "slow",
+      "timestamp_start": 5.115,
+      "timestamp_end": 16.698
+    },
+    {
+      "role": "User",
+      "text": "緩緩地說，列出五種台灣城市。",
+      "speed": "",
+      "timestamp_start": 16.948,
+      "timestamp_end": 21.174
+    },
+    {
+      "role": "Agent",
+      "text": "台北、台中、台南、高雄、屏東。",
+      "speed": "slow",
+      "timestamp_start": 21.424,
+      "timestamp_end": 27.974
+    },
+    {
+      "role": "User",
+      "text": "慢慢來，請朗讀這句話，秋天是收穫的季節。",
+      "speed": "",
+      "timestamp_start": 28.224,
+      "timestamp_end": 33.228
+    },
+    {
+      "role": "Agent",
+      "text": "秋天是收穫的季節。",
+      "speed": "slow",
+      "timestamp_start": 33.478,
+      "timestamp_end": 37.694
+    },
+    {
+      "role": "User",
+      "text": "放慢腳步說，比較一下看書和看电视哪個更好。",
+      "speed": "",
+      "timestamp_start": 37.944,
+      "timestamp_end": 43.076
+    },
+    {
+      "role": "Agent",
+      "text": "看書能激發想像力，電視提供視覺享受，看書更好。",
+      "speed": "slow",
+      "timestamp_start": 43.326,
+      "timestamp_end": 52.262
+    }
+  ],
+  "total_duration_sec": 52.26
+}

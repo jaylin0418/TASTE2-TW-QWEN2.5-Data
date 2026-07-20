@@ -1,0 +1,44 @@
+{
+  "id": "if_control_000003",
+  "type": "type4_if_control",
+  "tts_backend": "indextts",
+  "if_tasks": [
+    "比較",
+    "朗讀"
+  ],
+  "speed_sequence": [
+    "slow",
+    "normal_silent"
+  ],
+  "turns": [
+    {
+      "role": "User",
+      "text": "用慢的速度，比較一下夏天和冬天哪個季節更适合露營。",
+      "speed": "",
+      "timestamp_start": 0.0,
+      "timestamp_end": 7.407
+    },
+    {
+      "role": "Agent",
+      "text": "夏天露營可以享受溫暖天氣和長日照，但冬天可能會太冷且日照不足，所以夏天比較適合露營。",
+      "speed": "slow",
+      "timestamp_start": 7.657,
+      "timestamp_end": 20.25
+    },
+    {
+      "role": "User",
+      "text": "現在讀這句話，雨後的空氣特別新鮮。",
+      "speed": "",
+      "timestamp_start": 20.5,
+      "timestamp_end": 26.247
+    },
+    {
+      "role": "Agent",
+      "text": "雨後的空氣特別新鮮。",
+      "speed": "",
+      "timestamp_start": 26.497,
+      "timestamp_end": 28.993
+    }
+  ],
+  "total_duration_sec": 28.99
+}
