@@ -1,0 +1,37 @@
+#!/bin/bash
+#SBATCH -J to_parquet_if_control
+#SBATCH -A mst113101
+#SBATCH -p ngs62g
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=04:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/to_parquet_if_control_%j.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/to_parquet_if_control_%j.err
+
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python3
+DATA_TYPE=if_control
+
+mkdir -p $REPO/logs $REPO/parquet/$DATA_TYPE
+
+echo "============================================================"
+echo "Job: to_parquet_if_control  JobID: $SLURM_JOB_ID"
+echo "Start: $(date)"
+echo "============================================================"
+
+echo "--- Language filter: $DATA_TYPE ---"
+$PYTHON $REPO/scripts/filter_english_dialogues.py --type $DATA_TYPE
+echo ""
+
+echo "--- to_parquet: $DATA_TYPE ---"
+$PYTHON $REPO/to_parquet/to_parquet_v5.py \
+    --input  $REPO/tts_output/$DATA_TYPE \
+    --output $REPO/parquet/$DATA_TYPE \
+    --prefix $DATA_TYPE \
+    --chunk-gb 1.0
+
+echo "============================================================"
+echo "to_parquet_if_control done. End: $(date)"
+echo "============================================================"

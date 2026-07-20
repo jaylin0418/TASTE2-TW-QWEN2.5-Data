@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Type 6: IF Control dialogue generation.
+Type 4: IF Control dialogue generation.
 甲 gives IF tasks WITH explicit speed instructions; 乙 executes.
 Speed state is determined per-task and stored in turn metadata.
 
@@ -169,7 +169,7 @@ def main():
 
             record = {
                 "id": dialogue_id,
-                "type": "if_control",
+                "type": "type4_if_control",
                 "tts_backend": backend,
                 "if_tasks": task_list,
                 "speed_sequence": speed_list,

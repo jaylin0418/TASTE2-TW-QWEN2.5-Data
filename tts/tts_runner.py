@@ -417,7 +417,7 @@ def process_dialogue(
         turn_wav_paths = raw_paths
         turn_ref_list = turn_refs
 
-    # Compute timestamps using raw TTS output (no speed stretching)
+    # Apply speed stretching per turn, then compute timestamps
     turn_meta = []
     turn_wavs = []
     timestamp = 0.0
@@ -427,18 +427,29 @@ def process_dialogue(
             logger.warning(f"{dlg_id} turn {i}: missing wav, skipping")
             continue
 
+        # Speed stretch for fast/slow turns (type4 if_control / type5 speed_ua Agent turns)
+        spd = (turn.get("speed") or "normal").strip()
+        if spd in ("fast", "slow"):
+            stretched_path = dlg_out_dir / f"turn_{i:03d}_stretched.wav"
+            if not stretched_path.exists():
+                stretch_wav(str(turn_wav), str(stretched_path), spd,
+                            fast_factor, slow_factor)
+            effective_wav = stretched_path
+        else:
+            effective_wav = turn_wav
+
         ref = turn_ref_list[i] if i < len(turn_ref_list) else {}
-        audio, audio_sr = sf.read(str(turn_wav), dtype="float32")
+        audio, audio_sr = sf.read(str(effective_wav), dtype="float32")
         duration = len(audio) / audio_sr
         turn_meta.append({
             **turn,
             "ref_wav": ref.get("wav", ref.get("wav_abs", "")),
             "ref_speaker_id": ref.get("speaker_id", ""),
-            "wav": str(turn_wav.relative_to(out_dir.parent)),
+            "wav": str(effective_wav.relative_to(out_dir.parent)),
             "timestamp_start": round(timestamp, 3),
             "timestamp_end": round(timestamp + duration, 3),
         })
-        turn_wavs.append(str(turn_wav))
+        turn_wavs.append(str(effective_wav))
         timestamp += duration + SILENCE_SEC
 
     if not turn_wavs:

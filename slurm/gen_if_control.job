@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH -J gen_if_control
+#SBATCH -A mst113101
+#SBATCH -p ngs62g
+#SBATCH --array=0-7
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --time=12:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_if_control_%A_%a.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/gen_if_control_%A_%a.err
+
+# ── USER CONFIGURATION ────────────────────────────────────────────────────────
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/vllm_py312/bin/python3
+VLLM_PORT=8000
+VLLM_HOST=$(cat $REPO/logs/vllm_host.txt 2>/dev/null || echo "localhost")
+CONFIG=$REPO/conf/if_control.yaml
+OUTPUT=$REPO/output/if_control
+NUM_WORKERS=8
+NUM_DIALOGUES=2000   # per worker → total = NUM_WORKERS × NUM_DIALOGUES = 16000
+# ─────────────────────────────────────────────────────────────────────────────
+
+mkdir -p $REPO/logs $OUTPUT
+
+WORKER_ID=$SLURM_ARRAY_TASK_ID
+
+echo "=========================================="
+echo "Job: gen_if_control  Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID"
+echo "Worker: $WORKER_ID/$NUM_WORKERS  vLLM: $VLLM_HOST:$VLLM_PORT"
+echo "Start: $(date)"
+echo "=========================================="
+
+$PYTHON $REPO/generate/gen_if_control.py \
+    --config      "$CONFIG" \
+    --num-dialogues "$NUM_DIALOGUES" \
+    --output      "$OUTPUT" \
+    --worker-id   "$WORKER_ID" \
+    --num-workers "$NUM_WORKERS" \
+    --vllm-url    "http://${VLLM_HOST}:${VLLM_PORT}/v1"
+
+echo "End: $(date)"

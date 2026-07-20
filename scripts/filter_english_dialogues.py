@@ -23,7 +23,7 @@ import unicodedata
 from pathlib import Path
 
 TTS_ROOT = Path("/work/jaylin0418/TASTE2-TW-QWEN2.5-Data/tts_output")
-TYPES = ["user_agent", "daily_conv", "if_data"]
+TYPES = ["user_agent", "daily_conv", "if_data", "if_control", "speed_ua"]
 
 _TOK_SPLIT = re.compile(r'[\s,;.!?\"\'.。，；！？、：]+')
 
@@ -98,7 +98,7 @@ def process_type(data_type: str, dry_run: bool):
         print(f"[SKIP] {base} not found")
         return
 
-    strict = (data_type == "if_data")
+    strict = data_type in ("if_data", "if_control")
     deleted_dlg = 0
     deleted_sec = 0.0
     kept_dlg = 0
@@ -137,7 +137,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--type", default="all",
-                        choices=["user_agent", "daily_conv", "if_data", "all"])
+                        choices=["user_agent", "daily_conv", "if_data",
+                                 "if_control", "speed_ua", "all"])
     args = parser.parse_args()
 
     types = TYPES if args.type == "all" else [args.type]

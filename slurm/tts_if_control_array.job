@@ -1,0 +1,56 @@
+#!/bin/bash
+#SBATCH -J tts_if_control
+#SBATCH -A mst113101
+#SBATCH -p 8gpus
+#SBATCH --array=0-7
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
+#SBATCH -o /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/tts_if_control_%A_%a.out
+#SBATCH -e /work/jaylin0418/TASTE2-TW-QWEN2.5-Data/logs/tts_if_control_%A_%a.err
+
+# ── USER CONFIGURATION ────────────────────────────────────────────────────────
+REPO=/work/jaylin0418/TASTE2-TW-QWEN2.5-Data
+PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+INDEXTTS_DIR=/work/jaylin0418/cog-IndexTTS-2
+CV_POOL=/work/jaylin0418/common_voice_zh_TW/pool/cv_pool.json
+REF_AUDIO_DIR=/home/jaylin0418/SpeechLab/ref_audio/eleven_lab_emotion
+BREEZY_REPO=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice
+BREEZY_PYTHON=/home/jaylin0418/miniconda3/envs/breezyvoice_py310/bin/python
+BREEZY_MODEL=/home/jaylin0418/SpeechLab/tts_model/BreezyVoice/checkpoints/hf_cache/models--MediaTek-Research--BreezyVoice-300M/snapshots/e33b502e0ac21c16b0ee0d00df66ac3fa737393d
+DATA_TYPE=if_control
+INPUT_BASE=$REPO/output/${DATA_TYPE}
+OUTPUT_BASE=$REPO/tts_output/${DATA_TYPE}
+# ─────────────────────────────────────────────────────────────────────────────
+
+WORKER_ID=$(printf "%02d" $SLURM_ARRAY_TASK_ID)
+INPUT=$INPUT_BASE/dialogues_w${WORKER_ID}.jsonl
+OUTPUT=$OUTPUT_BASE/worker_${WORKER_ID}
+
+mkdir -p $REPO/logs $OUTPUT
+
+echo "=========================================="
+echo "Job: tts_if_control  DataType: $DATA_TYPE  Worker: $WORKER_ID"
+echo "Job ID: $SLURM_JOB_ID  Node: $SLURM_NODELIST"
+echo "Input: $INPUT"
+echo "Start: $(date)"
+echo "=========================================="
+
+export PYTHONPATH=$INDEXTTS_DIR:$REPO:$PYTHONPATH
+
+$PYTHON $REPO/tts/tts_runner.py \
+    --input         "$INPUT" \
+    --output        "$OUTPUT" \
+    --config        $REPO/conf/base.yaml \
+    --indextts-dir  $INDEXTTS_DIR \
+    --cv-pool       $CV_POOL \
+    --ref-audio-dir $REF_AUDIO_DIR \
+    --breezy-repo   $BREEZY_REPO \
+    --breezy-python $BREEZY_PYTHON \
+    --breezy-model  $BREEZY_MODEL \
+    --worker-id 0 --num-workers 1
+
+echo "End: $(date)"
